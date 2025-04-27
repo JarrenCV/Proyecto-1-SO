@@ -1,23 +1,15 @@
-CONSUMIDOR[2] fd=4 conectado
-CONSUMIDOR[1] fd=5 conectado
-PRODUCER_CONEX fd=6
-RECIBIDO producer 127.0.0.1:44284 id=1 
-GRUPO=2 ENVIADO consumer fd=4 id=1
-GRUPO=1 ENVIADO consumer fd=5 id=1
-MENSAJE_REENVIADO id=1 a 2 grupos
-RECIBIDO_ACK consumer[2] fd=4 id=1
-RECIBIDO_ACK consumer[1] fd=5 id=1
-PRODUCER_CONEX fd=7
-RECIBIDO producer 127.0.0.1:44290 id=2 
-GRUPO=2 ENVIADO consumer fd=4 id=2
-GRUPO=1 ENVIADO consumer fd=5 id=2
-MENSAJE_REENVIADO id=2 a 2 grupos
-RECIBIDO_ACK consumer[1] fd=5 id=2
-RECIBIDO_ACK consumer[2] fd=4 id=2
-PRODUCER_CONEX fd=6
-RECIBIDO producer 127.0.0.1:44292 id=3 
-GRUPO=2 ENVIADO consumer fd=4 id=3
-GRUPO=1 ENVIADO consumer fd=5 id=3
-MENSAJE_REENVIADO id=3 a 2 grupos
-RECIBIDO_ACK consumer[1] fd=5 id=3
-RECIBIDO_ACK consumer[2] fd=4 id=3
+CONSUMIDOR[grupo1] fd=4 conectado
+CONSUMIDOR[grupo2] fd=5 conectado
+CONSUMIDOR[grupo3] fd=6 conectado
+CONSUMIDOR[grupo1] fd=7 conectado
+CONSUMIDOR[grupo2] fd=8 conectado
+CONSUMIDOR[grupo3] fd=9 conectado
+PRODUCER_CONEX fd=10
+RECIBIDO producer 127.0.0.1:60028 id=1 
+GRUPO=grupo1 ENVIADO consumer fd=4 id=1
+GRUPO=grupo2 ENVIADO consumer fd=5 id=1
+GRUPO=grupo3 ENVIADO consumer fd=6 id=1
+MENSAJE_REENVIADO id=1 a 3 grupos
+RECIBIDO_ACK consumer[grupo1] fd=4 id=1
+RECIBIDO_ACK consumer[grupo2] fd=5 id=1
+RECIBIDO_ACK consumer[grupo3] fd=6 id=1

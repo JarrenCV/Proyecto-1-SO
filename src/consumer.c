@@ -3,7 +3,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <stdarg.h>
 
 #define BROKER_IP "127.0.0.1"
 #define BROKER_PORT 5000
@@ -14,14 +13,8 @@ typedef struct {
     char contenido[MAXIMO_MENSAJE];
 } Mensajillo;
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Uso: %s <grupo>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-    char *grupo = argv[1];
-    char peticion[64];
-    snprintf(peticion, sizeof(peticion), "CONSUMIR %s", grupo);
+int main() {
+    const char peticion[] = "CONSUMIR";
 
     int sockfd = -1;
     struct sockaddr_in broker_addr;
@@ -35,7 +28,6 @@ int main(int argc, char *argv[]) {
     }
 
     while (1) {
-        // Si el socket no está abierto, intenta abrirlo y conectarlo
         if (sockfd < 0) {
             if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
                 perror("socket");
@@ -51,8 +43,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // Enviar petición de consumo
-        if (send(sockfd, peticion, strlen(peticion)+1, 0) < 0) {
+        if (send(sockfd, peticion, strlen(peticion) + 1, 0) < 0) {
             perror("send");
             close(sockfd);
             sockfd = -1;
@@ -60,20 +51,15 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Intentar recibir un mensaje
         ssize_t n = recv(sockfd, &mensaje, sizeof(Mensajillo), 0);
         if (n == sizeof(Mensajillo)) {
             printf("[Consumer PID=%d] Recibido: id=%d, contenido=%s\n",
                    getpid(), mensaje.id, mensaje.contenido);
 
-            // Envía ACK al broker para que lo loguee él
             char ackmsg[32];
             snprintf(ackmsg, sizeof(ackmsg), "ACK %d", mensaje.id);
             send(sockfd, ackmsg, strlen(ackmsg) + 1, 0);
-
-            // no guardamos log local, todo va al broker
         } else if (n == 0) {
-            // El broker cerró la conexión
             printf("[Consumer PID=%d] Broker cerró la conexión.\n", getpid());
             close(sockfd);
             sockfd = -1;
@@ -84,7 +70,6 @@ int main(int argc, char *argv[]) {
         sleep(1);
     }
 
-    // Nunca se llega aquí, pero por buenas prácticas:
     if (sockfd >= 0) close(sockfd);
     return 0;
 }

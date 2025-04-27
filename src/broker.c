@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <limits.h>   // para qsort
 
 // Prototipo único de guardar_log(), debe estar antes de cualquier llamada
 static void guardar_log(const char *fmt, ...);
@@ -21,7 +22,7 @@ static void guardar_log(const char *fmt, ...);
 #define MAXIMO_MENSAJE 256
 #define TAMANO_COLA 10
 #define BROKER_PORT 5000
-#define MAX_GRUPOS 10
+#define MAX_GRUPOS 3
 #define MAX_CONSUMERS_PER_GROUP 100
 
 typedef struct {
@@ -111,20 +112,37 @@ void inicializar_cola(ColaMensajillos *cola) {
     pthread_mutexattr_destroy(&attr);
 }
 
-// Initialize all groups
+// ---------------------------------------------------------
+// a) inicializar 10 grupos fijos
 void inicializar_grupos() {
     pthread_mutex_lock(&grupos_mutex);
     for (int i = 0; i < MAX_GRUPOS; i++) {
+        snprintf(grupos[i].nombre, sizeof(grupos[i].nombre), "grupo%d", i+1);
         grupos[i].count = 0;
         grupos[i].offset = 0;
-        grupos[i].nombre[0] = '\0';
         pthread_mutex_init(&grupos[i].mutex, NULL);
     }
-    num_grupos = 0;
+    num_grupos = MAX_GRUPOS;
     pthread_mutex_unlock(&grupos_mutex);
 }
 
-// find or create a group by name
+// b) seleccionar el grupo con menos consumers
+static GrupoConsumers *seleccionar_grupo_automatico() {
+    pthread_mutex_lock(&grupos_mutex);
+    int min_idx = 0;
+    int min_count = grupos[0].count;
+    for (int i = 1; i < num_grupos; i++) {
+        if (grupos[i].count < min_count) {
+            min_count = grupos[i].count;
+            min_idx = i;
+        }
+    }
+    GrupoConsumers *g = &grupos[min_idx];
+    pthread_mutex_unlock(&grupos_mutex);
+    return g;
+}
+
+// Busca un grupo por nombre (ninguno se crea dinámicamente, ya están los 10 precargados)
 static GrupoConsumers *obtener_o_crear_grupo(const char *nombre) {
     pthread_mutex_lock(&grupos_mutex);
     for (int i = 0; i < num_grupos; i++) {
@@ -132,16 +150,6 @@ static GrupoConsumers *obtener_o_crear_grupo(const char *nombre) {
             pthread_mutex_unlock(&grupos_mutex);
             return &grupos[i];
         }
-    }
-    if (num_grupos < MAX_GRUPOS) {
-        GrupoConsumers *g = &grupos[num_grupos++];
-        strncpy(g->nombre, nombre, 31);
-        g->nombre[31] = '\0';
-        g->count = 0;
-        g->offset = 0;
-        // mutex already inited
-        pthread_mutex_unlock(&grupos_mutex);
-        return g;
     }
     pthread_mutex_unlock(&grupos_mutex);
     return NULL;
@@ -234,29 +242,75 @@ static Mensajillo log_mensajes[MAX_MENSAJES_LOG];
 static int num_log_mensajes = 0;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// comparador para ordenar por id
-static int compare_mensajillo(const void *a, const void *b) {
-    const Mensajillo *ma = a, *mb = b;
-    return ma->id - mb->id;
+// comparador para qsort
+static int _cmp_entry(const void *a, const void *b) {
+    const Mensajillo *x = a;
+    const Mensajillo *y = b;
+    return x->id - y->id;
 }
 
-// agrega el mensaje al array, ordena y reescribe mensajes.log
 static void actualizar_mensajes_log(const Mensajillo *msg) {
-    pthread_mutex_lock(&log_mutex);
-    if (num_log_mensajes < MAX_MENSAJES_LOG) {
-        log_mensajes[num_log_mensajes++] = *msg;
-        qsort(log_mensajes, num_log_mensajes, sizeof(Mensajillo), compare_mensajillo);
-        FILE *f = fopen("mensajes.log", "w");
-        if (f) {
-            for (int i = 0; i < num_log_mensajes; i++) {
-                fprintf(f, "id=%d contenido=\"%s\"\n",
-                        log_mensajes[i].id,
-                        log_mensajes[i].contenido);
+    Mensajillo *arr = NULL;
+    size_t n = 0, cap = 0;
+    FILE *f = fopen("mensajes.log", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            Mensajillo tmp;
+            if (sscanf(line, "id=%d contenido=\"%255[^\"]\"",
+                       &tmp.id, tmp.contenido) == 2)
+            {
+                if (n == cap) {
+                    cap = cap ? cap * 2 : 16;
+                    arr = realloc(arr, cap * sizeof(*arr));
+                }
+                arr[n++] = tmp;
             }
-            fclose(f);
+        }
+        fclose(f);
+    }
+    // añadir el mensaje nuevo
+    if (n == cap) {
+        cap = cap ? cap * 2 : 16;
+        arr = realloc(arr, cap * sizeof(*arr));
+    }
+    arr[n++] = *msg;
+
+    // ordenar por id
+    qsort(arr, n, sizeof(*arr), _cmp_entry);
+
+    // reescribir en modo "w" (sobrescribe) ya ordenado
+    f = fopen("mensajes.log", "w");
+    if (!f) {
+        perror("abrir mensajes.log");
+        free(arr);
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        fprintf(f, "id=%d contenido=\"%s\"\n",
+                arr[i].id, arr[i].contenido);
+    }
+    fclose(f);
+    free(arr);
+}
+
+// Inicializa mensaje_id_global leyendo el mayor id en mensajes.log
+static void inicializar_id_global() {
+    FILE *f = fopen("mensajes.log", "r");
+    if (!f) {
+        mensaje_id_global = 1;
+        return;
+    }
+    int max_id = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        int id;
+        if (sscanf(line, "id=%d ", &id) == 1 && id > max_id) {
+            max_id = id;
         }
     }
-    pthread_mutex_unlock(&log_mutex);
+    fclose(f);
+    mensaje_id_global = max_id + 1;
 }
 
 // Hilo para manejar cada conexión
@@ -265,7 +319,6 @@ void *atender_cliente(void *arg) {
     free(arg);
 
     char buffer[sizeof(Mensajillo)];
-    // pre‐peek para distinguir producer/consumer…
     ssize_t n = recv(clientfd, buffer, sizeof(Mensajillo), MSG_PEEK);
     if (n <= 0) {
         close(clientfd);
@@ -326,14 +379,20 @@ void *atender_cliente(void *arg) {
     n = recv(clientfd, buffer, sizeof(buffer), 0);
     if (n > 0 && strncmp(buffer, "CONSUMIR", 8) == 0) {
         char group_name[32] = {0};
-        sscanf(buffer, "CONSUMIR %31s", group_name);
+        // si no viene nombre, elegir automáticamente
+        if (sscanf(buffer, "CONSUMIR %31s", group_name) != 1) {
+            GrupoConsumers *g = seleccionar_grupo_automatico();
+            if (g) {
+                strncpy(group_name, g->nombre, sizeof(group_name)-1);
+            } else {
+                strncpy(group_name, "grupo1", sizeof(group_name)-1);
+            }
+        }
         agregar_consumer_grupo(clientfd, group_name);
-        guardar_log("CONSUMIDOR[%s] fd=%d conectado",
-                    group_name, clientfd);
-        printf("Consumer[%s] connected: fd=%d\n",
-               group_name, clientfd);
+        guardar_log("CONSUMIDOR[%s] fd=%d conectado", group_name, clientfd);
+        printf("Consumer[%s] connected: fd=%d\n", group_name, clientfd);
 
-        // ahora esperamos ACKs por esa misma conexión
+        // procesar ACKs…
         while (1) {
             char ackbuf[64];
             ssize_t r = recv(clientfd, ackbuf, sizeof(ackbuf), 0);
@@ -364,6 +423,7 @@ int main() {
     }
     inicializar_cola(cola);
     inicializar_grupos();
+    inicializar_id_global();
 
     printf("Broker iniciado. Esperando conexiones en el puerto %d...\n", BROKER_PORT);
 
