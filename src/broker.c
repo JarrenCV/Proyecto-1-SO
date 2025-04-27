@@ -2,7 +2,7 @@
 #define BROKER_H
 
 #include <stdio.h>
-#include <stdlib.h>
+#include <stdlib.h>    // ya estaba, para qsort()
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <string.h>
@@ -60,7 +60,7 @@ int noTieneElementos(ColaMensajillos *cola) {
     return cola->pleer == cola->plibre;
 }
 
-void guardar_en_logillo(Mensajillo* mensaje) {
+static void guardar_en_logillo(Mensajillo* mensaje) {
     FILE* log = fopen("mensajes.log", "a");
     if (log != NULL) {
         fprintf(log, "%s\n", mensaje->contenido);
@@ -82,8 +82,8 @@ int insertar_mensajillo(ColaMensajillos *cola, Mensajillo *nuevo) {
         printf("COLA_LLENA id=%d contenido=\"%s\"\n",
                nuevo->id, nuevo->contenido);
         // Aviso en log
-        guardar_log("COLA_LLENA id=%d contenido=\"%s\"",
-                    nuevo->id, nuevo->contenido);
+        guardar_log("COLA_LLENA id=%d",
+                    nuevo->id);
     }
     pthread_mutex_unlock(&cola->mutexCola);
     return ok;
@@ -204,8 +204,8 @@ static int enviar_a_todos_grupos(Mensajillo *msg) {
                 quitar_consumer_grupo(cs, g->nombre);
             } else {
                 sent_groups++;
-                guardar_log("GRUPO=%s ENVIADO consumer fd=%d id=%d contenido=\"%s\"",
-                            g->nombre, cs, msg->id, msg->contenido);
+                guardar_log("GRUPO=%s ENVIADO consumer fd=%d id=%d",
+                            g->nombre, cs, msg->id);
             }
         }
         pthread_mutex_unlock(&g->mutex);
@@ -226,6 +226,37 @@ static void guardar_log(const char *fmt, ...) {
     fprintf(f, "\n");
     va_end(ap);
     fclose(f);
+}
+
+#define MAX_MENSAJES_LOG 10000
+
+static Mensajillo log_mensajes[MAX_MENSAJES_LOG];
+static int num_log_mensajes = 0;
+static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// comparador para ordenar por id
+static int compare_mensajillo(const void *a, const void *b) {
+    const Mensajillo *ma = a, *mb = b;
+    return ma->id - mb->id;
+}
+
+// agrega el mensaje al array, ordena y reescribe mensajes.log
+static void actualizar_mensajes_log(const Mensajillo *msg) {
+    pthread_mutex_lock(&log_mutex);
+    if (num_log_mensajes < MAX_MENSAJES_LOG) {
+        log_mensajes[num_log_mensajes++] = *msg;
+        qsort(log_mensajes, num_log_mensajes, sizeof(Mensajillo), compare_mensajillo);
+        FILE *f = fopen("mensajes.log", "w");
+        if (f) {
+            for (int i = 0; i < num_log_mensajes; i++) {
+                fprintf(f, "id=%d contenido=\"%s\"\n",
+                        log_mensajes[i].id,
+                        log_mensajes[i].contenido);
+            }
+            fclose(f);
+        }
+    }
+    pthread_mutex_unlock(&log_mutex);
 }
 
 // Hilo para manejar cada conexión
@@ -255,6 +286,9 @@ void *atender_cliente(void *arg) {
         recibido.id = mensaje_id_global++;
         pthread_mutex_unlock(&id_mutex);
 
+        // <-- aquí insertamos la actualización de mensajes.log
+        actualizar_mensajes_log(&recibido);
+
         // 2) LOG de recepción **antes** de reenviar
         {
             struct sockaddr_in sa; socklen_t salen = sizeof(sa);
@@ -262,8 +296,8 @@ void *atender_cliente(void *arg) {
                 char hip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &sa.sin_addr, hip, sizeof(hip));
                 int hport = ntohs(sa.sin_port);
-                guardar_log("RECIBIDO producer %s:%d id=%d contenido=\"%s\"",
-                            hip, hport, recibido.id, recibido.contenido);
+                guardar_log("RECIBIDO producer %s:%d id=%d ",
+                            hip, hport, recibido.id);
             }
         }
 
