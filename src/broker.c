@@ -80,10 +80,10 @@ int insertar_mensajillo(ColaMensajillos *cola, Mensajillo *nuevo) {
         ok = 1;
     } else {
         // Aviso en terminal
-        printf("COLA_LLENA id=%d contenido=\"%s\"\n",
+        printf("COLA_LLENA id_mensaje=%d contenido=\"%s\"\n",
                nuevo->id, nuevo->contenido);
         // Aviso en log
-        guardar_log("COLA_LLENA id=%d",
+        guardar_log("COLA_LLENA id_mensaje=%d",
                     nuevo->id);
     }
     pthread_mutex_unlock(&cola->mutexCola);
@@ -212,7 +212,7 @@ static int enviar_a_todos_grupos(Mensajillo *msg) {
                 quitar_consumer_grupo(cs, g->nombre);
             } else {
                 sent_groups++;
-                guardar_log("GRUPO=%s ENVIADO consumer fd=%d id=%d",
+                guardar_log("GRUPO=%s ENVIADO consumer fd=%d id_mensaje=%d",
                             g->nombre, cs, msg->id);
             }
         }
@@ -257,7 +257,7 @@ static void actualizar_mensajes_log(const Mensajillo *msg) {
         char line[512];
         while (fgets(line, sizeof(line), f)) {
             Mensajillo tmp;
-            if (sscanf(line, "id=%d contenido=\"%255[^\"]\"",
+            if (sscanf(line, "id_mensaje=%d contenido=\"%255[^\"]\"",
                        &tmp.id, tmp.contenido) == 2)
             {
                 if (n == cap) {
@@ -287,7 +287,7 @@ static void actualizar_mensajes_log(const Mensajillo *msg) {
         return;
     }
     for (size_t i = 0; i < n; i++) {
-        fprintf(f, "id=%d contenido=\"%s\"\n",
+        fprintf(f, "id_mensaje=%d contenido=\"%s\"\n",
                 arr[i].id, arr[i].contenido);
     }
     fclose(f);
@@ -305,7 +305,7 @@ static void inicializar_id_global() {
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         int id;
-        if (sscanf(line, "id=%d ", &id) == 1 && id > max_id) {
+        if (sscanf(line, "id_mensaje=%d ", &id) == 1 && id > max_id) {
             max_id = id;
         }
     }
@@ -349,7 +349,7 @@ void *atender_cliente(void *arg) {
                 char hip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &sa.sin_addr, hip, sizeof(hip));
                 int hport = ntohs(sa.sin_port);
-                guardar_log("RECIBIDO producer %s:%d id=%d ",
+                guardar_log("RECIBIDO producer %s:%d id_mensaje=%d ",
                             hip, hport, recibido.id);
             }
         }
@@ -358,10 +358,10 @@ void *atender_cliente(void *arg) {
         if (insertar_mensajillo(cola, &recibido)) {
             int enviados = enviar_a_todos_grupos(&recibido);
             // Aviso en terminal
-            printf("MENSAJE_REENVIADO id=%d a %d grupos\n",
+            printf("MENSAJE_REENVIADO id_mensaje=%d a %d grupos\n",
                    recibido.id, enviados);
             // Aviso en log
-            guardar_log("MENSAJE_REENVIADO id=%d a %d grupos",
+            guardar_log("MENSAJE_REENVIADO id_mensaje=%d a %d grupos",
                         recibido.id, enviados);
 
             // ahora eliminamos el mensaje de la cola para liberar espacio
@@ -403,7 +403,7 @@ void *atender_cliente(void *arg) {
             }
             if (strncmp(ackbuf, "ACK ", 4) == 0) {
                 int ack_id = atoi(ackbuf + 4);
-                guardar_log("RECIBIDO_ACK consumer[%s] fd=%d id=%d",
+                guardar_log("RECIBIDO_ACK consumer[%s] fd=%d id_mensaje=%d",
                             group_name, clientfd, ack_id);
             }
         }

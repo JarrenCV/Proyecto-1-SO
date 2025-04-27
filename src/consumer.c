@@ -53,7 +53,7 @@ int main() {
 
         ssize_t n = recv(sockfd, &mensaje, sizeof(Mensajillo), 0);
         if (n == sizeof(Mensajillo)) {
-            printf("[Consumer PID=%d] Recibido: id=%d, contenido=%s\n",
+            printf("[Consumer PID=%d] Recibido: id_mensaje=%d, contenido=%s\n",
                    getpid(), mensaje.id, mensaje.contenido);
 
             char ackmsg[32];
