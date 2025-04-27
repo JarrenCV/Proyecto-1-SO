@@ -1,0 +1,76 @@
+CONSUMIDOR[1] fd=7 desconectado
+GRUPO[1] cerrado (sin consumers)
+CONSUMIDOR[1] fd=7 desconectado
+CONSUMIDOR[1] fd=4 conectado
+CONSUMIDOR[1] fd=5 conectado
+CONSUMIDOR[b] fd=6 conectado
+PRODUCER_CONEX fd=7
+RECIBIDO producer 127.0.0.1:35702 id=1 contenido="Hola, soy el producer con PID 9958"
+GRUPO=1 ENVIADO consumer fd=4 id=1 contenido="Hola, soy el producer con PID 9958"
+GRUPO=b ENVIADO consumer fd=6 id=1 contenido="Hola, soy el producer con PID 9958"
+MENSAJE_REENVIADO id=1 a 2 grupos
+RECIBIDO_ACK consumer[1] fd=4 id=1
+RECIBIDO_ACK consumer[b] fd=6 id=1
+CONSUMIDOR[b] fd=6 desconectado
+GRUPO[b] cerrado (sin consumers)
+CONSUMIDOR[b] fd=6 desconectado
+PRODUCER_CONEX fd=8
+RECIBIDO producer 127.0.0.1:51272 id=2 contenido="Hola, soy el producer con PID 10002"
+GRUPO=1 ENVIADO consumer fd=5 id=2 contenido="Hola, soy el producer con PID 10002"
+MENSAJE_REENVIADO id=2 a 1 grupos
+RECIBIDO_ACK consumer[1] fd=5 id=2
+CONSUMIDOR[b] fd=7 conectado
+CONSUMIDOR[c] fd=8 conectado
+PRODUCER_CONEX fd=9
+RECIBIDO producer 127.0.0.1:35840 id=3 contenido="Hola, soy el producer con PID 10145"
+GRUPO=1 ENVIADO consumer fd=4 id=3 contenido="Hola, soy el producer con PID 10145"
+GRUPO=b ENVIADO consumer fd=7 id=3 contenido="Hola, soy el producer con PID 10145"
+RECIBIDO_ACK consumer[1] fd=4 id=3
+GRUPO=c ENVIADO consumer fd=8 id=3 contenido="Hola, soy el producer con PID 10145"
+MENSAJE_REENVIADO id=3 a 3 grupos
+RECIBIDO_ACK consumer[b] fd=7 id=3
+RECIBIDO_ACK consumer[c] fd=8 id=3
+CONSUMIDOR[1] fd=5 desconectado
+CONSUMIDOR[1] fd=5 desconectado
+PRODUCER_CONEX fd=10
+RECIBIDO producer 127.0.0.1:44384 id=4 contenido="Hola, soy el producer con PID 10172"
+GRUPO=1 ENVIADO consumer fd=4 id=4 contenido="Hola, soy el producer con PID 10172"
+GRUPO=b ENVIADO consumer fd=7 id=4 contenido="Hola, soy el producer con PID 10172"
+GRUPO=c ENVIADO consumer fd=8 id=4 contenido="Hola, soy el producer con PID 10172"
+RECIBIDO_ACK consumer[1] fd=4 id=4
+MENSAJE_REENVIADO id=4 a 3 grupos
+RECIBIDO_ACK consumer[c] fd=8 id=4
+RECIBIDO_ACK consumer[b] fd=7 id=4
+CONSUMIDOR[c] fd=8 desconectado
+GRUPO[c] cerrado (sin consumers)
+CONSUMIDOR[c] fd=8 desconectado
+PRODUCER_CONEX fd=9
+RECIBIDO producer 127.0.0.1:44390 id=5 contenido="Hola, soy el producer con PID 10192"
+GRUPO=1 ENVIADO consumer fd=4 id=5 contenido="Hola, soy el producer con PID 10192"
+GRUPO=b ENVIADO consumer fd=7 id=5 contenido="Hola, soy el producer con PID 10192"
+MENSAJE_REENVIADO id=5 a 2 grupos
+RECIBIDO_ACK consumer[1] fd=4 id=5
+RECIBIDO_ACK consumer[b] fd=7 id=5
+CONSUMIDOR[b] fd=7 desconectado
+GRUPO[b] cerrado (sin consumers)
+CONSUMIDOR[b] fd=7 desconectado
+PRODUCER_CONEX fd=10
+RECIBIDO producer 127.0.0.1:58810 id=6 contenido="Hola, soy el producer con PID 10224"
+GRUPO=1 ENVIADO consumer fd=4 id=6 contenido="Hola, soy el producer con PID 10224"
+MENSAJE_REENVIADO id=6 a 1 grupos
+RECIBIDO_ACK consumer[1] fd=4 id=6
+PRODUCER_CONEX fd=9
+RECIBIDO producer 127.0.0.1:41980 id=7 contenido="Hola, soy el producer con PID 10238"
+GRUPO=1 ENVIADO consumer fd=4 id=7 contenido="Hola, soy el producer con PID 10238"
+MENSAJE_REENVIADO id=7 a 1 grupos
+RECIBIDO_ACK consumer[1] fd=4 id=7
+PRODUCER_CONEX fd=10
+RECIBIDO producer 127.0.0.1:41982 id=8 contenido="Hola, soy el producer con PID 10240"
+GRUPO=1 ENVIADO consumer fd=4 id=8 contenido="Hola, soy el producer con PID 10240"
+MENSAJE_REENVIADO id=8 a 1 grupos
+RECIBIDO_ACK consumer[1] fd=4 id=8
+PRODUCER_CONEX fd=9
+RECIBIDO producer 127.0.0.1:41996 id=9 contenido="Hola, soy el producer con PID 10248"
+GRUPO=1 ENVIADO consumer fd=4 id=9 contenido="Hola, soy el producer con PID 10248"
+MENSAJE_REENVIADO id=9 a 1 grupos
+RECIBIDO_ACK consumer[1] fd=4 id=9

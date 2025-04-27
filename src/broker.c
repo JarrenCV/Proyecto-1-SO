@@ -15,10 +15,14 @@
 #include <errno.h>
 #include <stdarg.h>
 
+// Prototipo único de guardar_log(), debe estar antes de cualquier llamada
+static void guardar_log(const char *fmt, ...);
+
 #define MAXIMO_MENSAJE 256
 #define TAMANO_COLA 10
 #define BROKER_PORT 5000
-#define MAX_CONSUMERS 100
+#define MAX_GRUPOS 10
+#define MAX_CONSUMERS_PER_GROUP 100
 
 typedef struct {
     int id;
@@ -36,8 +40,17 @@ ColaMensajillos *cola = NULL;
 int mensaje_id_global = 1; // ID consecutivo para los mensajes
 pthread_mutex_t id_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static int consumer_sockets[MAX_CONSUMERS];
-static pthread_mutex_t consumers_mutex = PTHREAD_MUTEX_INITIALIZER;
+typedef struct {
+    char nombre[32];
+    int sockets[MAX_CONSUMERS_PER_GROUP];
+    int count;
+    int offset;
+    pthread_mutex_t mutex;
+} GrupoConsumers;
+
+static GrupoConsumers grupos[MAX_GRUPOS];
+static int num_grupos = 0;
+static pthread_mutex_t grupos_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int estaRellenita(ColaMensajillos *cola) {
     return (cola->plibre + 1) % TAMANO_COLA == cola->pleer;
@@ -65,7 +78,12 @@ int insertar_mensajillo(ColaMensajillos *cola, Mensajillo *nuevo) {
         cola->plibre = (cola->plibre + 1) % TAMANO_COLA;
         ok = 1;
     } else {
-        printf("Colilla rellenita, no cabe más\n");
+        // Aviso en terminal
+        printf("COLA_LLENA id=%d contenido=\"%s\"\n",
+               nuevo->id, nuevo->contenido);
+        // Aviso en log
+        guardar_log("COLA_LLENA id=%d contenido=\"%s\"",
+                    nuevo->id, nuevo->contenido);
     }
     pthread_mutex_unlock(&cola->mutexCola);
     return ok;
@@ -93,50 +111,107 @@ void inicializar_cola(ColaMensajillos *cola) {
     pthread_mutexattr_destroy(&attr);
 }
 
-// Añade un nuevo consumer a la lista
-void agregar_consumer(int sockfd) {
-    pthread_mutex_lock(&consumers_mutex);
-    for (int i = 0; i < MAX_CONSUMERS; ++i) {
-        if (consumer_sockets[i] < 0) {
-            consumer_sockets[i] = sockfd;
+// Initialize all groups
+void inicializar_grupos() {
+    pthread_mutex_lock(&grupos_mutex);
+    for (int i = 0; i < MAX_GRUPOS; i++) {
+        grupos[i].count = 0;
+        grupos[i].offset = 0;
+        grupos[i].nombre[0] = '\0';
+        pthread_mutex_init(&grupos[i].mutex, NULL);
+    }
+    num_grupos = 0;
+    pthread_mutex_unlock(&grupos_mutex);
+}
+
+// find or create a group by name
+static GrupoConsumers *obtener_o_crear_grupo(const char *nombre) {
+    pthread_mutex_lock(&grupos_mutex);
+    for (int i = 0; i < num_grupos; i++) {
+        if (strcmp(grupos[i].nombre, nombre) == 0) {
+            pthread_mutex_unlock(&grupos_mutex);
+            return &grupos[i];
+        }
+    }
+    if (num_grupos < MAX_GRUPOS) {
+        GrupoConsumers *g = &grupos[num_grupos++];
+        strncpy(g->nombre, nombre, 31);
+        g->nombre[31] = '\0';
+        g->count = 0;
+        g->offset = 0;
+        // mutex already inited
+        pthread_mutex_unlock(&grupos_mutex);
+        return g;
+    }
+    pthread_mutex_unlock(&grupos_mutex);
+    return NULL;
+}
+
+void agregar_consumer_grupo(int sockfd, const char *grupo) {
+    GrupoConsumers *g = obtener_o_crear_grupo(grupo);
+    if (!g) return;
+    pthread_mutex_lock(&g->mutex);
+    if (g->count < MAX_CONSUMERS_PER_GROUP) {
+        g->sockets[g->count++] = sockfd;
+    }
+    pthread_mutex_unlock(&g->mutex);
+}
+
+void quitar_consumer_grupo(int sockfd, const char *grupo) {
+    pthread_mutex_lock(&grupos_mutex);
+    for (int i = 0; i < num_grupos; i++) {
+        if (strcmp(grupos[i].nombre, grupo) == 0) {
+            GrupoConsumers *g = &grupos[i];
+            pthread_mutex_lock(&g->mutex);
+            for (int j = 0; j < g->count; j++) {
+                if (g->sockets[j] == sockfd) {
+                    // desplazamos el array
+                    memmove(&g->sockets[j],
+                            &g->sockets[j+1],
+                            (g->count - j - 1) * sizeof(int));
+                    g->count--;
+                    // log y terminal: consumidor desconectado
+                    guardar_log("CONSUMIDOR[%s] fd=%d desconectado",
+                                grupo, sockfd);
+                    printf("Consumer[%s] disconnected: fd=%d\n",
+                           grupo, sockfd);
+                    // si el grupo quedó sin consumidores
+                    if (g->count == 0) {
+                        guardar_log("GRUPO[%s] cerrado (sin consumers)", grupo);
+                        printf("Group[%s] closed (no more consumers)\n", grupo);
+                    }
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g->mutex);
             break;
         }
     }
-    pthread_mutex_unlock(&consumers_mutex);
+    pthread_mutex_unlock(&grupos_mutex);
 }
 
-// Elimina un consumer de la lista
-void quitar_consumer(int sockfd) {
-    pthread_mutex_lock(&consumers_mutex);
-    for (int i = 0; i < MAX_CONSUMERS; ++i) {
-        if (consumer_sockets[i] == sockfd) {
-            consumer_sockets[i] = -1;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&consumers_mutex);
-}
-
-static void guardar_log(const char *fmt, ...);
-
-// Envía el mensaje a todos los consumers conectados
-void enviar_a_todos_consumers(Mensajillo *msg) {
-    pthread_mutex_lock(&consumers_mutex);
-    for (int i = 0; i < MAX_CONSUMERS; ++i) {
-        int cs = consumer_sockets[i];
-        if (cs >= 0) {
-            printf("[Broker] Enviando a consumer fd=%d: id=%d, contenido=%s\n",
-                   cs, msg->id, msg->contenido);
-            if (send(cs, msg, sizeof(Mensajillo), 0) != sizeof(Mensajillo)) {
+static int enviar_a_todos_grupos(Mensajillo *msg) {
+    pthread_mutex_lock(&grupos_mutex);
+    int sent_groups = 0;
+    for (int i = 0; i < num_grupos; i++) {
+        GrupoConsumers *g = &grupos[i];
+        pthread_mutex_lock(&g->mutex);
+        if (g->count > 0) {
+            int idx = g->offset++ % g->count;
+            int cs  = g->sockets[idx];
+            if (send(cs, msg, sizeof(*msg), 0) != sizeof(*msg)) {
                 close(cs);
-                consumer_sockets[i] = -1;
+                quitar_consumer_grupo(cs, g->nombre);
             } else {
-                guardar_log("ENVIADO consumer fd=%d id=%d contenido=\"%s\"",
-                            cs, msg->id, msg->contenido);
+                sent_groups++;
+                guardar_log("GRUPO=%s ENVIADO consumer fd=%d id=%d contenido=\"%s\"",
+                            g->nombre, cs, msg->id, msg->contenido);
             }
         }
+        pthread_mutex_unlock(&g->mutex);
     }
-    pthread_mutex_unlock(&consumers_mutex);
+    pthread_mutex_unlock(&grupos_mutex);
+    return sent_groups;
 }
 
 static void guardar_log(const char *fmt, ...) {
@@ -155,10 +230,11 @@ static void guardar_log(const char *fmt, ...) {
 
 // Hilo para manejar cada conexión
 void *atender_cliente(void *arg) {
-    int clientfd = *(int *)arg;
+    int clientfd = *(int*)arg;
     free(arg);
 
     char buffer[sizeof(Mensajillo)];
+    // pre‐peek para distinguir producer/consumer…
     ssize_t n = recv(clientfd, buffer, sizeof(Mensajillo), MSG_PEEK);
     if (n <= 0) {
         close(clientfd);
@@ -167,8 +243,12 @@ void *atender_cliente(void *arg) {
 
     // rama producer
     if (n >= (ssize_t)sizeof(Mensajillo)) {
+        // Producer conectado
+        guardar_log("PRODUCER_CONEX fd=%d", clientfd);
+        printf("Producer connected: fd=%d\n", clientfd);
+
         Mensajillo recibido;
-        recv(clientfd, &recibido, sizeof(Mensajillo), 0);
+        recv(clientfd, &recibido, sizeof(recibido), 0);
 
         // 1) asignar ID
         pthread_mutex_lock(&id_mutex);
@@ -189,7 +269,13 @@ void *atender_cliente(void *arg) {
 
         // 3) insertar en cola, reenviar y liberar espacio
         if (insertar_mensajillo(cola, &recibido)) {
-            enviar_a_todos_consumers(&recibido);
+            int enviados = enviar_a_todos_grupos(&recibido);
+            // Aviso en terminal
+            printf("MENSAJE_REENVIADO id=%d a %d grupos\n",
+                   recibido.id, enviados);
+            // Aviso en log
+            guardar_log("MENSAJE_REENVIADO id=%d a %d grupos",
+                        recibido.id, enviados);
 
             // ahora eliminamos el mensaje de la cola para liberar espacio
             Mensajillo descartado;
@@ -202,25 +288,30 @@ void *atender_cliente(void *arg) {
         pthread_exit(NULL);
     }
 
-    // si no era un Mensajillo, probablemente es un consumer pidiendo consumir
+    // rama consumer
     n = recv(clientfd, buffer, sizeof(buffer), 0);
     if (n > 0 && strncmp(buffer, "CONSUMIR", 8) == 0) {
-        agregar_consumer(clientfd);
-        guardar_log("CONSUMIDOR fd=%d conectado", clientfd);
+        char group_name[32] = {0};
+        sscanf(buffer, "CONSUMIR %31s", group_name);
+        agregar_consumer_grupo(clientfd, group_name);
+        guardar_log("CONSUMIDOR[%s] fd=%d conectado",
+                    group_name, clientfd);
+        printf("Consumer[%s] connected: fd=%d\n",
+               group_name, clientfd);
 
         // ahora esperamos ACKs por esa misma conexión
         while (1) {
             char ackbuf[64];
             ssize_t r = recv(clientfd, ackbuf, sizeof(ackbuf), 0);
             if (r <= 0) {
-                // desconexión
-                quitar_consumer(clientfd);
-                guardar_log("CONSUMIDOR fd=%d desconectado", clientfd);
+                quitar_consumer_grupo(clientfd, group_name);
+                guardar_log("CONSUMIDOR[%s] fd=%d desconectado", group_name, clientfd);
                 break;
             }
             if (strncmp(ackbuf, "ACK ", 4) == 0) {
                 int ack_id = atoi(ackbuf + 4);
-                guardar_log("RECIBIDO_ACK consumer fd=%d id=%d", clientfd, ack_id);
+                guardar_log("RECIBIDO_ACK consumer[%s] fd=%d id=%d",
+                            group_name, clientfd, ack_id);
             }
         }
     } else {
@@ -238,8 +329,7 @@ int main() {
         exit(1);
     }
     inicializar_cola(cola);
-    // Inicializar lista de consumers
-    for (int i = 0; i < MAX_CONSUMERS; ++i) consumer_sockets[i] = -1;
+    inicializar_grupos();
 
     printf("Broker iniciado. Esperando conexiones en el puerto %d...\n", BROKER_PORT);
 

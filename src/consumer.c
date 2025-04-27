@@ -14,11 +14,18 @@ typedef struct {
     char contenido[MAXIMO_MENSAJE];
 } Mensajillo;
 
-int main() {
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Uso: %s <grupo>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+    char *grupo = argv[1];
+    char peticion[64];
+    snprintf(peticion, sizeof(peticion), "CONSUMIR %s", grupo);
+
     int sockfd = -1;
     struct sockaddr_in broker_addr;
     Mensajillo mensaje;
-    char peticion[] = "CONSUMIR";
 
     broker_addr.sin_family = AF_INET;
     broker_addr.sin_port = htons(BROKER_PORT);
@@ -45,7 +52,7 @@ int main() {
         }
 
         // Enviar petición de consumo
-        if (send(sockfd, peticion, sizeof(peticion), 0) < 0) {
+        if (send(sockfd, peticion, strlen(peticion)+1, 0) < 0) {
             perror("send");
             close(sockfd);
             sockfd = -1;
