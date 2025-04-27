@@ -15,6 +15,11 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <limits.h>   // para qsort
+#include <stdbool.h>  // Para usar bool
+
+// Configuración del thread pool
+#define THREAD_POOL_SIZE 1000
+#define MAX_QUEUE_SIZE 256
 
 // Prototipo único de guardar_log(), debe estar antes de cualquier llamada
 static void guardar_log(const char *fmt, ...);
@@ -30,16 +35,49 @@ typedef struct {
     char contenido[MAXIMO_MENSAJE];
 } Mensajillo;
 
+// Declaración anticipada de funciones
+static void actualizar_mensajes_log(const Mensajillo *msg);
+
+// Datos para el manejador de clientes
+typedef struct {
+    int clientfd;
+} ClientHandlerData;
+
+// Datos para actualizar logs
+typedef struct {
+    Mensajillo mensaje;
+} LogUpdateData;
+
+// Estructura para tareas en el thread pool
+typedef enum {
+    TASK_CLIENT_HANDLER,
+    TASK_LOG_UPDATE,
+} TaskType;
+
+typedef struct {
+    TaskType type;
+    void *data;
+} Task;
+
+// Estructura para thread pool
+typedef struct {
+    pthread_t threads[THREAD_POOL_SIZE];
+    Task queue[MAX_QUEUE_SIZE];
+    int queue_size;
+    int front;
+    int rear;
+    pthread_mutex_t queue_mutex;
+    pthread_cond_t queue_not_empty;
+    pthread_cond_t queue_not_full;
+    bool shutdown;
+} ThreadPool;
+
 typedef struct {
     Mensajillo messages[TAMANO_COLA];
     int pleer;
     int plibre;
     pthread_mutex_t mutexCola;
 } ColaMensajillos;
-
-ColaMensajillos *cola = NULL;
-int mensaje_id_global = 1; // ID consecutivo para los mensajes
-pthread_mutex_t id_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
     char nombre[32];
@@ -49,9 +87,165 @@ typedef struct {
     pthread_mutex_t mutex;
 } GrupoConsumers;
 
+// Variables globales
+ColaMensajillos *cola = NULL;
+int mensaje_id_global = 1; // ID consecutivo para los mensajes
+pthread_mutex_t id_mutex = PTHREAD_MUTEX_INITIALIZER;
 static GrupoConsumers grupos[MAX_GRUPOS];
 static int num_grupos = 0;
 static pthread_mutex_t grupos_mutex = PTHREAD_MUTEX_INITIALIZER;
+static ThreadPool *pool = NULL;
+
+#define MAX_MENSAJES_LOG 10000
+static Mensajillo log_mensajes[MAX_MENSAJES_LOG];
+static int num_log_mensajes = 0;
+static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Prototipos de funciones
+void atender_cliente_task(ClientHandlerData *data);
+int estaRellenita(ColaMensajillos *cola);
+int noTieneElementos(ColaMensajillos *cola);
+int insertar_mensajillo(ColaMensajillos *cola, Mensajillo *nuevo);
+int consumir_mensajillo(ColaMensajillos *cola, Mensajillo *destino);
+void inicializar_cola(ColaMensajillos *cola);
+void inicializar_grupos();
+static GrupoConsumers *seleccionar_grupo_automatico();
+static GrupoConsumers *obtener_o_crear_grupo(const char *nombre);
+void agregar_consumer_grupo(int sockfd, const char *grupo);
+void quitar_consumer_grupo(int sockfd, const char *grupo);
+static int enviar_a_todos_grupos(Mensajillo *msg);
+static void guardar_en_logillo(Mensajillo* mensaje);
+static void inicializar_id_global();
+
+// Inicialización del thread pool
+ThreadPool* thread_pool_init() {
+    ThreadPool* pool = (ThreadPool*)malloc(sizeof(ThreadPool));
+    if (!pool) {
+        perror("malloc thread pool");
+        return NULL;
+    }
+    
+    pool->queue_size = 0;
+    pool->front = 0;
+    pool->rear = 0;
+    pool->shutdown = false;
+    
+    pthread_mutex_init(&pool->queue_mutex, NULL);
+    pthread_cond_init(&pool->queue_not_empty, NULL);
+    pthread_cond_init(&pool->queue_not_full, NULL);
+    
+    return pool;
+}
+
+// Añadir tarea al thread pool
+int thread_pool_add_task(ThreadPool* pool, TaskType type, void* data) {
+    pthread_mutex_lock(&pool->queue_mutex);
+    
+    // Esperar si la cola está llena
+    while (pool->queue_size == MAX_QUEUE_SIZE && !pool->shutdown) {
+        pthread_cond_wait(&pool->queue_not_full, &pool->queue_mutex);
+    }
+    
+    // No aceptar más tareas si está en shutdown
+    if (pool->shutdown) {
+        pthread_mutex_unlock(&pool->queue_mutex);
+        return -1;
+    }
+    
+    // Añadir tarea a la cola
+    Task task = {
+        .type = type,
+        .data = data
+    };
+    
+    pool->queue[pool->rear] = task;
+    pool->rear = (pool->rear + 1) % MAX_QUEUE_SIZE;
+    pool->queue_size++;
+    
+    // Señalar que la cola ya no está vacía
+    pthread_cond_signal(&pool->queue_not_empty);
+    pthread_mutex_unlock(&pool->queue_mutex);
+    
+    return 0;
+}
+
+// Función que ejecutan los threads del pool
+void* thread_function(void* arg) {
+    ThreadPool* pool = (ThreadPool*)arg;
+    
+    while (1) {
+        pthread_mutex_lock(&pool->queue_mutex);
+        
+        // Esperar si la cola está vacía y no hay shutdown
+        while (pool->queue_size == 0 && !pool->shutdown) {
+            pthread_cond_wait(&pool->queue_not_empty, &pool->queue_mutex);
+        }
+        
+        // Si es shutdown y la cola está vacía, terminar
+        if (pool->shutdown && pool->queue_size == 0) {
+            pthread_mutex_unlock(&pool->queue_mutex);
+            pthread_exit(NULL);
+        }
+        
+        // Obtener una tarea de la cola
+        Task task = pool->queue[pool->front];
+        pool->front = (pool->front + 1) % MAX_QUEUE_SIZE;
+        pool->queue_size--;
+        
+        // Señalar que la cola ya no está llena
+        pthread_cond_signal(&pool->queue_not_full);
+        pthread_mutex_unlock(&pool->queue_mutex);
+        
+        // Ejecutar la tarea según su tipo
+        switch (task.type) {
+            case TASK_CLIENT_HANDLER: {
+                ClientHandlerData* data = (ClientHandlerData*)task.data;
+                atender_cliente_task(data);
+                break;
+            }
+            case TASK_LOG_UPDATE: {
+                LogUpdateData* data = (LogUpdateData*)task.data;
+                actualizar_mensajes_log(&data->mensaje);
+                free(data);
+                break;
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+// Iniciar los threads del pool
+int thread_pool_start(ThreadPool* pool) {
+    for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+        if (pthread_create(&pool->threads[i], NULL, thread_function, pool) != 0) {
+            perror("pthread_create");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Cerrar el thread pool
+void thread_pool_shutdown(ThreadPool* pool) {
+    if (!pool) return;
+    
+    pthread_mutex_lock(&pool->queue_mutex);
+    pool->shutdown = true;
+    pthread_cond_broadcast(&pool->queue_not_empty);
+    pthread_cond_broadcast(&pool->queue_not_full);
+    pthread_mutex_unlock(&pool->queue_mutex);
+    
+    for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+        pthread_join(pool->threads[i], NULL);
+    }
+    
+    pthread_mutex_destroy(&pool->queue_mutex);
+    pthread_cond_destroy(&pool->queue_not_empty);
+    pthread_cond_destroy(&pool->queue_not_full);
+    
+    free(pool);
+}
 
 int estaRellenita(ColaMensajillos *cola) {
     return (cola->plibre + 1) % TAMANO_COLA == cola->pleer;
@@ -236,12 +430,6 @@ static void guardar_log(const char *fmt, ...) {
     fclose(f);
 }
 
-#define MAX_MENSAJES_LOG 10000
-
-static Mensajillo log_mensajes[MAX_MENSAJES_LOG];
-static int num_log_mensajes = 0;
-static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 // comparador para qsort
 static int _cmp_entry(const void *a, const void *b) {
     const Mensajillo *x = a;
@@ -313,16 +501,16 @@ static void inicializar_id_global() {
     mensaje_id_global = max_id + 1;
 }
 
-// Hilo para manejar cada conexión
-void *atender_cliente(void *arg) {
-    int clientfd = *(int*)arg;
-    free(arg);
+// Función para atender al cliente (versión para el thread pool)
+void atender_cliente_task(ClientHandlerData *data) {
+    int clientfd = data->clientfd;
+    free(data);
 
     char buffer[sizeof(Mensajillo)];
     ssize_t n = recv(clientfd, buffer, sizeof(Mensajillo), MSG_PEEK);
     if (n <= 0) {
         close(clientfd);
-        pthread_exit(NULL);
+        return;
     }
 
     // rama producer
@@ -339,10 +527,14 @@ void *atender_cliente(void *arg) {
         recibido.id = mensaje_id_global++;
         pthread_mutex_unlock(&id_mutex);
 
-        // <-- aquí insertamos la actualización de mensajes.log
-        actualizar_mensajes_log(&recibido);
+        // 2) Delegamos la actualización del log a un thread del pool
+        LogUpdateData *log_data = malloc(sizeof(LogUpdateData));
+        if (log_data) {
+            log_data->mensaje = recibido;
+            thread_pool_add_task(pool, TASK_LOG_UPDATE, log_data);
+        }
 
-        // 2) LOG de recepción **antes** de reenviar
+        // 3) LOG de recepción **antes** de reenviar
         {
             struct sockaddr_in sa; socklen_t salen = sizeof(sa);
             if (getpeername(clientfd, (struct sockaddr*)&sa, &salen) == 0) {
@@ -354,7 +546,7 @@ void *atender_cliente(void *arg) {
             }
         }
 
-        // 3) insertar en cola, reenviar y liberar espacio
+        // 4) insertar en cola, reenviar y liberar espacio
         if (insertar_mensajillo(cola, &recibido)) {
             int enviados = enviar_a_todos_grupos(&recibido);
             // Aviso en terminal
@@ -372,7 +564,7 @@ void *atender_cliente(void *arg) {
         }
 
         close(clientfd);
-        pthread_exit(NULL);
+        return;
     }
 
     // rama consumer
@@ -410,7 +602,6 @@ void *atender_cliente(void *arg) {
     } else {
         close(clientfd);
     }
-    pthread_exit(NULL);
 }
 
 int main() {
@@ -425,7 +616,21 @@ int main() {
     inicializar_grupos();
     inicializar_id_global();
 
-    printf("Broker iniciado. Esperando conexiones en el puerto %d...\n", BROKER_PORT);
+    // Inicializar thread pool
+    pool = thread_pool_init();
+    if (!pool) {
+        fprintf(stderr, "Error al inicializar el thread pool\n");
+        exit(1);
+    }
+    
+    // Iniciar los threads
+    if (thread_pool_start(pool) != 0) {
+        fprintf(stderr, "Error al iniciar los threads del pool\n");
+        exit(1);
+    }
+
+    printf("Broker iniciado con %d threads. Esperando conexiones en el puerto %d...\n", 
+           THREAD_POOL_SIZE, BROKER_PORT);
 
     int serverfd = socket(AF_INET, SOCK_STREAM, 0);
     if (serverfd < 0) {
@@ -454,19 +659,32 @@ int main() {
     while (1) {
         struct sockaddr_in cli_addr;
         socklen_t cli_len = sizeof(cli_addr);
-        int *clientfd = malloc(sizeof(int));
-        *clientfd = accept(serverfd, (struct sockaddr *)&cli_addr, &cli_len);
-        if (*clientfd < 0) {
+        int clientfd = accept(serverfd, (struct sockaddr *)&cli_addr, &cli_len);
+        if (clientfd < 0) {
             perror("accept");
-            free(clientfd);
             continue;
         }
-        pthread_t tid;
-        pthread_create(&tid, NULL, atender_cliente, clientfd);
-        pthread_detach(tid);
+        
+        // Crear datos para la tarea
+        ClientHandlerData *data = malloc(sizeof(ClientHandlerData));
+        if (!data) {
+            perror("malloc client data");
+            close(clientfd);
+            continue;
+        }
+        data->clientfd = clientfd;
+        
+        // Añadir tarea al thread pool
+        if (thread_pool_add_task(pool, TASK_CLIENT_HANDLER, data) != 0) {
+            fprintf(stderr, "Error al añadir tarea al thread pool\n");
+            free(data);
+            close(clientfd);
+        }
     }
 
+    // Nunca llegará aquí, pero por completitud:
     close(serverfd);
+    thread_pool_shutdown(pool);
     munmap(cola, sizeof(ColaMensajillos));
     return 0;
 }
