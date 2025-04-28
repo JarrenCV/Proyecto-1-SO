@@ -71,11 +71,11 @@ for ((i=1; i<=NUM_CONSUMERS; i++)); do
     echo -e "${GREEN}Consumer $i iniciado con PID $CONSUMER_PID${NC}"
     
     # Pequeña pausa para evitar sobrecarga
-    sleep 0.2
+    #sleep 0.2
 done
 
 # Esperar un momento para asegurar que los consumers estén listos
-sleep 3
+#sleep 3
 
 # Lanzar producers en un bucle con retardos aleatorios
 echo -e "${BLUE}Iniciando fase de prueba con $NUM_PRODUCERS producers...${NC}"
@@ -93,7 +93,7 @@ for ((i=1; i<=NUM_PRODUCERS; i++)); do
     echo -e "${GREEN}Producer $i iniciado con PID $PRODUCER_PID${NC}"
     
     #Esperar un intervalo pequeño para el siguiente producer
-    sleep $DELAY
+    #sleep $DELAY
 done
 
 echo -e "${BLUE}Todos los producers han sido lanzados. Esperando a que finalice la prueba...${NC}"
@@ -108,7 +108,7 @@ fi
 # Esperar un poco más para que terminen todas las operaciones
 COOLDOWN=5
 echo -e "${YELLOW}Esperando $COOLDOWN segundos adicionales para que se completen todas las operaciones...${NC}"
-sleep $COOLDOWN
+#sleep $COOLDOWN
 
 # Recopilar resultados
 echo -e "${BLUE}Recopilando resultados...${NC}"

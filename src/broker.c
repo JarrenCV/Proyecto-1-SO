@@ -18,14 +18,14 @@
 #include <stdbool.h>  // Para usar bool
 
 // Configuración del thread pool
-#define THREAD_POOL_SIZE 1000
+#define THREAD_POOL_SIZE 3500
 #define MAX_QUEUE_SIZE 256
 
 // Prototipo único de guardar_log(), debe estar antes de cualquier llamada
 static void guardar_log(const char *fmt, ...);
 
 #define MAXIMO_MENSAJE 256
-#define TAMANO_COLA 10
+#define TAMANO_COLA 2000  // o más, dependiendo de tus necesidades
 #define BROKER_PORT 5000
 #define MAX_GRUPOS 3
 #define MAX_CONSUMERS_PER_GROUP 100
@@ -266,22 +266,29 @@ static void guardar_en_logillo(Mensajillo* mensaje) {
 }
 
 int insertar_mensajillo(ColaMensajillos *cola, Mensajillo *nuevo) {
-    int ok = 0;
-    pthread_mutex_lock(&cola->mutexCola);
-    if (!estaRellenita(cola)) {
-        cola->messages[cola->plibre] = *nuevo;
-        cola->plibre = (cola->plibre + 1) % TAMANO_COLA;
-        ok = 1;
-    } else {
-        // Aviso en terminal
-        printf("COLA_LLENA id_mensaje=%d contenido=\"%s\"\n",
-               nuevo->id, nuevo->contenido);
-        // Aviso en log
-        guardar_log("COLA_LLENA id_mensaje=%d",
-                    nuevo->id);
+    int retries = 5;  // Intentaremos varias veces antes de fallar
+    
+    while (retries > 0) {
+        pthread_mutex_lock(&cola->mutexCola);
+        if (!estaRellenita(cola)) {
+            // Hay espacio, insertar
+            cola->messages[cola->plibre] = *nuevo;
+            cola->plibre = (cola->plibre + 1) % TAMANO_COLA;
+            pthread_mutex_unlock(&cola->mutexCola);
+            return 1;  // Éxito
+        }
+        pthread_mutex_unlock(&cola->mutexCola);
+        
+        // Cola llena, esperar un poco e intentar de nuevo
+        fprintf(stderr, "Cola llena. Esperando para mensaje id=%d (intento %d)\n", 
+                nuevo->id, 6-retries);
+        usleep(100000);  // 100ms
+        retries--;
     }
-    pthread_mutex_unlock(&cola->mutexCola);
-    return ok;
+    
+    fprintf(stderr, "COLA_LLENA id_mensaje=%d contenido=\"%s\"\n", 
+            nuevo->id, nuevo->contenido);
+    return 0;  // La cola sigue llena después de varios intentos
 }
 
 int consumir_mensajillo(ColaMensajillos *cola, Mensajillo *destino) {
@@ -416,18 +423,31 @@ static int enviar_a_todos_grupos(Mensajillo *msg) {
     return sent_groups;
 }
 
+// Mutex global para proteger la escritura del log
+static pthread_mutex_t log_file_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static void guardar_log(const char *fmt, ...) {
+    pthread_mutex_lock(&log_file_mutex);  // Bloquear antes de acceder al archivo
+    
     FILE *f = fopen("broker.log", "a");
     if (!f) {
         perror("abrir broker.log");
+        pthread_mutex_unlock(&log_file_mutex);  // No olvidar desbloquear
         return;
     }
+    
     va_list ap;
     va_start(ap, fmt);
     vfprintf(f, fmt, ap);
     fprintf(f, "\n");
     va_end(ap);
+    
+    // Forzar escritura inmediata al disco
+    fflush(f);
+    fsync(fileno(f));
+    
     fclose(f);
+    pthread_mutex_unlock(&log_file_mutex);  // Desbloquear después de terminar
 }
 
 // comparador para qsort
@@ -549,18 +569,16 @@ void atender_cliente_task(ClientHandlerData *data) {
         // 4) insertar en cola, reenviar y liberar espacio
         if (insertar_mensajillo(cola, &recibido)) {
             int enviados = enviar_a_todos_grupos(&recibido);
+            // Ahora eliminamos el mensaje de la cola para liberar espacio
+            Mensajillo dummy;
+            consumir_mensajillo(cola, &dummy);
+
             // Aviso en terminal
             printf("MENSAJE_REENVIADO id_mensaje=%d a %d grupos\n",
                    recibido.id, enviados);
             // Aviso en log
             guardar_log("MENSAJE_REENVIADO id_mensaje=%d a %d grupos",
                         recibido.id, enviados);
-
-            // ahora eliminamos el mensaje de la cola para liberar espacio
-            Mensajillo descartado;
-            if (!consumir_mensajillo(cola, &descartado)) {
-                fprintf(stderr, "Error: no se pudo liberar mensaje de la cola\n");
-            }
         }
 
         close(clientfd);
@@ -651,7 +669,7 @@ int main() {
         exit(1);
     }
 
-    if (listen(serverfd, 10) < 0) {
+    if (listen(serverfd, 1024) < 0) {
         perror("listen");
         exit(1);
     }
