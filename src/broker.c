@@ -17,8 +17,8 @@
 #include <limits.h>   // para qsort
 #include <stdbool.h>  // Para usar bool
 
-// Configuración del thread pool
-#define THREAD_POOL_SIZE 3500
+// Configuración del thread pool (sólo para producers)
+#define THREAD_POOL_SIZE 8
 #define MAX_QUEUE_SIZE 256
 
 // Prototipo único de guardar_log(), debe estar antes de cualquier llamada
@@ -38,10 +38,15 @@ typedef struct {
 // Declaración anticipada de funciones
 static void actualizar_mensajes_log(const Mensajillo *msg);
 
-// Datos para el manejador de clientes
+// Datos para el manejador de clientes (para producers)
 typedef struct {
     int clientfd;
 } ClientHandlerData;
+
+// Nueva estructura para hilos dedicados de consumers
+typedef struct {
+    int clientfd;
+} ConsumerThreadData;
 
 // Datos para actualizar logs
 typedef struct {
@@ -103,6 +108,7 @@ static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Prototipos de funciones
 void atender_cliente_task(ClientHandlerData *data);
+void *consumer_handler_thread(void *arg);  // Nueva función para hilos dedicados de consumers
 int estaRellenita(ColaMensajillos *cola);
 int noTieneElementos(ColaMensajillos *cola);
 int insertar_mensajillo(ColaMensajillos *cola, Mensajillo *nuevo);
@@ -521,72 +527,66 @@ static void inicializar_id_global() {
     mensaje_id_global = max_id + 1;
 }
 
-// Función para atender al cliente (versión para el thread pool)
+// Función para atender al cliente producer (usando thread pool)
 void atender_cliente_task(ClientHandlerData *data) {
     int clientfd = data->clientfd;
     free(data);
-
-    char buffer[sizeof(Mensajillo)];
-    ssize_t n = recv(clientfd, buffer, sizeof(Mensajillo), MSG_PEEK);
-    if (n <= 0) {
-        close(clientfd);
-        return;
+    
+    // Solo procesa producers ahora
+    Mensajillo recibido;
+    recv(clientfd, &recibido, sizeof(recibido), 0);
+    
+    // 1) asignar ID
+    pthread_mutex_lock(&id_mutex);
+    recibido.id = mensaje_id_global++;
+    pthread_mutex_unlock(&id_mutex);
+    
+    // 2) Delegamos la actualización del log a un thread del pool
+    LogUpdateData *log_data = malloc(sizeof(LogUpdateData));
+    if (log_data) {
+        log_data->mensaje = recibido;
+        thread_pool_add_task(pool, TASK_LOG_UPDATE, log_data);
     }
-
-    // rama producer
-    if (n >= (ssize_t)sizeof(Mensajillo)) {
-        // Producer conectado
-        guardar_log("PRODUCER_CONEX fd=%d", clientfd);
-        printf("Producer connected: fd=%d\n", clientfd);
-
-        Mensajillo recibido;
-        recv(clientfd, &recibido, sizeof(recibido), 0);
-
-        // 1) asignar ID
-        pthread_mutex_lock(&id_mutex);
-        recibido.id = mensaje_id_global++;
-        pthread_mutex_unlock(&id_mutex);
-
-        // 2) Delegamos la actualización del log a un thread del pool
-        LogUpdateData *log_data = malloc(sizeof(LogUpdateData));
-        if (log_data) {
-            log_data->mensaje = recibido;
-            thread_pool_add_task(pool, TASK_LOG_UPDATE, log_data);
+    
+    // 3) LOG de recepción **antes** de reenviar
+    {
+        struct sockaddr_in sa; socklen_t salen = sizeof(sa);
+        if (getpeername(clientfd, (struct sockaddr*)&sa, &salen) == 0) {
+            char hip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &sa.sin_addr, hip, sizeof(hip));
+            int hport = ntohs(sa.sin_port);
+            guardar_log("RECIBIDO producer %s:%d id_mensaje=%d ",
+                        hip, hport, recibido.id);
         }
-
-        // 3) LOG de recepción **antes** de reenviar
-        {
-            struct sockaddr_in sa; socklen_t salen = sizeof(sa);
-            if (getpeername(clientfd, (struct sockaddr*)&sa, &salen) == 0) {
-                char hip[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &sa.sin_addr, hip, sizeof(hip));
-                int hport = ntohs(sa.sin_port);
-                guardar_log("RECIBIDO producer %s:%d id_mensaje=%d ",
-                            hip, hport, recibido.id);
-            }
-        }
-
-        // 4) insertar en cola, reenviar y liberar espacio
-        if (insertar_mensajillo(cola, &recibido)) {
-            int enviados = enviar_a_todos_grupos(&recibido);
-            // Ahora eliminamos el mensaje de la cola para liberar espacio
-            Mensajillo dummy;
-            consumir_mensajillo(cola, &dummy);
-
-            // Aviso en terminal
-            printf("MENSAJE_REENVIADO id_mensaje=%d a %d grupos\n",
-                   recibido.id, enviados);
-            // Aviso en log
-            guardar_log("MENSAJE_REENVIADO id_mensaje=%d a %d grupos",
-                        recibido.id, enviados);
-        }
-
-        close(clientfd);
-        return;
     }
+    
+    // 4) insertar en cola, reenviar y liberar espacio
+    if (insertar_mensajillo(cola, &recibido)) {
+        int enviados = enviar_a_todos_grupos(&recibido);
+        // Ahora eliminamos el mensaje de la cola para liberar espacio
+        Mensajillo dummy;
+        consumir_mensajillo(cola, &dummy);
+        
+        // Aviso en terminal
+        printf("MENSAJE_REENVIADO id_mensaje=%d a %d grupos\n",
+               recibido.id, enviados);
+        // Aviso en log
+        guardar_log("MENSAJE_REENVIADO id_mensaje=%d a %d grupos",
+                    recibido.id, enviados);
+    }
+    
+    close(clientfd);
+}
 
-    // rama consumer
-    n = recv(clientfd, buffer, sizeof(buffer), 0);
+// Nueva función para manejar consumers en hilos dedicados
+void *consumer_handler_thread(void *arg) {
+    ConsumerThreadData *data = (ConsumerThreadData *)arg;
+    int clientfd = data->clientfd;
+    free(data); // Liberar la memoria asignada para la estructura
+    
+    char buffer[256];
+    ssize_t n = recv(clientfd, buffer, sizeof(buffer), 0);
+    
     if (n > 0 && strncmp(buffer, "CONSUMIR", 8) == 0) {
         char group_name[32] = {0};
         // si no viene nombre, elegir automáticamente
@@ -598,17 +598,17 @@ void atender_cliente_task(ClientHandlerData *data) {
                 strncpy(group_name, "grupo1", sizeof(group_name)-1);
             }
         }
+        
         agregar_consumer_grupo(clientfd, group_name);
-        guardar_log("CONSUMIDOR[%s] fd=%d conectado", group_name, clientfd);
-        printf("Consumer[%s] connected: fd=%d\n", group_name, clientfd);
-
+        guardar_log("CONSUMIDOR[%s] fd=%d conectado (hilo dedicado)", group_name, clientfd);
+        printf("Consumer[%s] connected: fd=%d (dedicated thread)\n", group_name, clientfd);
+        
         // procesar ACKs…
         while (1) {
             char ackbuf[64];
             ssize_t r = recv(clientfd, ackbuf, sizeof(ackbuf), 0);
             if (r <= 0) {
                 quitar_consumer_grupo(clientfd, group_name);
-                guardar_log("CONSUMIDOR[%s] fd=%d desconectado", group_name, clientfd);
                 break;
             }
             if (strncmp(ackbuf, "ACK ", 4) == 0) {
@@ -620,6 +620,8 @@ void atender_cliente_task(ClientHandlerData *data) {
     } else {
         close(clientfd);
     }
+    
+    return NULL;
 }
 
 int main() {
@@ -634,7 +636,7 @@ int main() {
     inicializar_grupos();
     inicializar_id_global();
 
-    // Inicializar thread pool
+    // Inicializar thread pool solo para producers
     pool = thread_pool_init();
     if (!pool) {
         fprintf(stderr, "Error al inicializar el thread pool\n");
@@ -647,7 +649,7 @@ int main() {
         exit(1);
     }
 
-    printf("Broker iniciado con %d threads. Esperando conexiones en el puerto %d...\n", 
+    printf("Broker iniciado con %d threads en pool para producers. Esperando conexiones en el puerto %d...\n", 
            THREAD_POOL_SIZE, BROKER_PORT);
 
     int serverfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -683,19 +685,61 @@ int main() {
             continue;
         }
         
-        // Crear datos para la tarea
-        ClientHandlerData *data = malloc(sizeof(ClientHandlerData));
-        if (!data) {
-            perror("malloc client data");
+        // Determinar si es un producer o consumer antes de asignar hilos
+        char buffer[sizeof(Mensajillo)];
+        ssize_t n = recv(clientfd, buffer, sizeof(Mensajillo), MSG_PEEK);
+        
+        if (n <= 0) {
             close(clientfd);
             continue;
         }
-        data->clientfd = clientfd;
         
-        // Añadir tarea al thread pool
-        if (thread_pool_add_task(pool, TASK_CLIENT_HANDLER, data) != 0) {
-            fprintf(stderr, "Error al añadir tarea al thread pool\n");
-            free(data);
+        // Producer: usar el thread pool
+        if (n >= (ssize_t)sizeof(Mensajillo)) {
+            // Crear datos para la tarea
+            ClientHandlerData *data = malloc(sizeof(ClientHandlerData));
+            if (!data) {
+                perror("malloc client data");
+                close(clientfd);
+                continue;
+            }
+            data->clientfd = clientfd;
+            
+            // Añadir tarea al thread pool
+            if (thread_pool_add_task(pool, TASK_CLIENT_HANDLER, data) != 0) {
+                fprintf(stderr, "Error al añadir tarea al thread pool\n");
+                free(data);
+                close(clientfd);
+            }
+        } 
+        // Consumer: crear un hilo dedicado
+        else if (n > 0 && strncmp(buffer, "CONSUMIR", 8) == 0) {
+            // Crear estructura de datos para el hilo consumer
+            ConsumerThreadData *consumer_data = malloc(sizeof(ConsumerThreadData));
+            if (!consumer_data) {
+                perror("malloc consumer data");
+                close(clientfd);
+                continue;
+            }
+            consumer_data->clientfd = clientfd;
+            
+            // Crear un hilo dedicado para este consumer
+            pthread_t consumer_thread;
+            if (pthread_create(&consumer_thread, NULL, consumer_handler_thread, consumer_data) != 0) {
+                perror("pthread_create consumer");
+                free(consumer_data);
+                close(clientfd);
+                continue;
+            }
+            
+            // Desacoplar el hilo para que se libere automáticamente al terminar
+            pthread_detach(consumer_thread);
+            
+            printf("Consumer thread created for client fd=%d\n", clientfd);
+        }
+        else {
+            // Conexión no reconocida
+            fprintf(stderr, "Conexión no reconocida, cerrando fd=%d\n", clientfd);
             close(clientfd);
         }
     }
@@ -706,5 +750,4 @@ int main() {
     munmap(cola, sizeof(ColaMensajillos));
     return 0;
 }
-
 #endif

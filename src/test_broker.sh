@@ -9,7 +9,7 @@ NC='\033[0m' # No Color
 
 # Configuración de prueba
 NUM_CONSUMERS=15           # Número total de consumers
-NUM_PRODUCERS=20           # Número de producers a lanzar
+NUM_PRODUCERS=10        # Número de producers a lanzar
 TEST_DURATION=30           # Duración total de la prueba en segundos
 
 # Compilar todos los programas
