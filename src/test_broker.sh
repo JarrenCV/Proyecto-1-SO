@@ -9,7 +9,7 @@ NC='\033[0m' # No Color
 
 # Configuración de prueba
 NUM_CONSUMERS=15           # Número total de consumers
-NUM_PRODUCERS=10        # Número de producers a lanzar
+NUM_PRODUCERS=3000           # Número de producers a lanzar
 TEST_DURATION=30           # Duración total de la prueba en segundos
 
 # Compilar todos los programas
@@ -46,9 +46,9 @@ function cleanup {
 # Registrar la función de limpieza para cuando el script termine
 trap cleanup EXIT INT TERM
 
-# Iniciar el broker
+# Iniciar el broker (redireccionando salida a /dev/null)
 echo -e "${BLUE}Iniciando el broker...${NC}"
-stdbuf -oL -eL ./broker > broker_output.log 2>&1 &
+./broker > /dev/null 2>&1 &
 BROKER_PID=$!
 
 # Esperar a que el broker esté listo (ajustar según sea necesario)
@@ -56,16 +56,16 @@ sleep 2
 
 # Verificar que el broker está ejecutándose
 if ! ps -p $BROKER_PID > /dev/null; then
-    echo -e "${RED}El broker no pudo iniciarse. Revisa broker_output.log para más detalles.${NC}"
+    echo -e "${RED}El broker no pudo iniciarse.${NC}"
     exit 1
 fi
 
 echo -e "${GREEN}Broker iniciado con PID $BROKER_PID${NC}"
 
-# Iniciar consumers (se conectarán a los grupos automáticamente)
+# Iniciar consumers (también redireccionando salida)
 echo -e "${BLUE}Iniciando $NUM_CONSUMERS consumers...${NC}"
 for ((i=1; i<=NUM_CONSUMERS; i++)); do
-    # Iniciar consumer sin especificar grupo (usará la asignación automática)
+    # Iniciar consumer redireccionando salida a /dev/null
     stdbuf -oL -eL ./consumer > consumer_${i}.log 2>&1 &
     CONSUMER_PID=$!
     echo -e "${GREEN}Consumer $i iniciado con PID $CONSUMER_PID${NC}"
@@ -74,10 +74,7 @@ for ((i=1; i<=NUM_CONSUMERS; i++)); do
     #sleep 0.2
 done
 
-# Esperar un momento para asegurar que los consumers estén listos
-#sleep 3
-
-# Lanzar producers en un bucle con retardos aleatorios
+# Lanzar producers en un bucle
 echo -e "${BLUE}Iniciando fase de prueba con $NUM_PRODUCERS producers...${NC}"
 echo -e "${YELLOW}La prueba durará aproximadamente $TEST_DURATION segundos${NC}"
 
@@ -88,7 +85,7 @@ if [ $DELAY -lt 1 ]; then
 fi
 
 for ((i=1; i<=NUM_PRODUCERS; i++)); do
-    stdbuf -oL -eL ./producer > producer_${i}.log 2>&1 &
+    ./producer > /dev/null 2>&1 &
     PRODUCER_PID=$!
     echo -e "${GREEN}Producer $i iniciado con PID $PRODUCER_PID${NC}"
     
@@ -102,7 +99,7 @@ echo -e "${BLUE}Todos los producers han sido lanzados. Esperando a que finalice 
 REMAINING=$((TEST_DURATION / 4))
 if [ $REMAINING -gt 0 ]; then
     echo -e "${YELLOW}Esperando $REMAINING segundos adicionales para completar la prueba...${NC}"
-    sleep $REMAINING
+    #sleep $REMAINING
 fi
 
 # Esperar un poco más para que terminen todas las operaciones
@@ -112,8 +109,8 @@ echo -e "${YELLOW}Esperando $COOLDOWN segundos adicionales para que se completen
 
 # Recopilar resultados
 echo -e "${BLUE}Recopilando resultados...${NC}"
-
-# Contar mensajes en el log
+#sleep 5
+# Contar mensajes en el log de mensajes (este sí lo mantenemos)
 if [ -f mensajes.log ]; then
     NUM_MESSAGES=$(wc -l < mensajes.log)
     echo -e "${GREEN}Total de mensajes registrados: $NUM_MESSAGES${NC}"
@@ -123,26 +120,14 @@ else
     echo -e "${RED}No se encontró el archivo mensajes.log${NC}"
 fi
 
-# Verificar logs de broker
-if [ -f broker.log ]; then
-    BROKER_MSGS=$(grep -c "RECIBIDO producer" broker.log)
-    BROKER_CONSUMERS=$(grep -c "CONSUMIDOR.*conectado" broker.log)
-    BROKER_REENVIOS=$(grep -c "MENSAJE_REENVIADO" broker.log)
-    
-    echo -e "${GREEN}Estadísticas del broker:${NC}"
-    echo -e "${GREEN}- Mensajes recibidos de producers: $BROKER_MSGS${NC}"
-    echo -e "${GREEN}- Consumidores conectados: $BROKER_CONSUMERS${NC}"
-    echo -e "${GREEN}- Mensajes reenviados: $BROKER_REENVIOS${NC}"
-    
-    # Estadísticas por grupo
-    for i in {1..3}; do
-        GROUP_MSGS=$(grep -c "GRUPO=grupo$i ENVIADO" broker.log)
-        echo -e "${GREEN}- Mensajes enviados al grupo$i: $GROUP_MSGS${NC}"
-    done
-else
-    echo -e "${RED}No se encontró el archivo broker.log${NC}"
-fi
-
-echo -e "${BLUE}Prueba completada. Revisa los archivos .log para más detalles.${NC}"
-
+echo -e "${BLUE}Prueba completada.${NC}"
+echo -e "${BLUE}Terminar con CRTL + C${NC}"
+while true; do
+    # Esperar indefinidamente para mantener el script activo
+    sleep 1
+done
 # La limpieza se hará automáticamente por la función trap al salir
+# La limpieza se hará automáticamente por la función trap al salir
+
+
+

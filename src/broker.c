@@ -1,6 +1,8 @@
 #ifndef BROKER_H
 #define BROKER_H
 
+#define _POSIX_C_SOURCE 199309L
+
 #include <stdio.h>
 #include <stdlib.h>    // ya estaba, para qsort()
 #include <sys/ipc.h>
@@ -106,6 +108,13 @@ static Mensajillo log_mensajes[MAX_MENSAJES_LOG];
 static int num_log_mensajes = 0;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Variables para control de ordenamiento periódico
+static pthread_t log_sorter_thread;
+static volatile int should_sort_log = 0;
+static pthread_mutex_t sort_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sort_cond = PTHREAD_COND_INITIALIZER;
+static volatile int log_sorter_running = 1;
+
 // Prototipos de funciones
 void atender_cliente_task(ClientHandlerData *data);
 void *consumer_handler_thread(void *arg);  // Nueva función para hilos dedicados de consumers
@@ -122,6 +131,8 @@ void quitar_consumer_grupo(int sockfd, const char *grupo);
 static int enviar_a_todos_grupos(Mensajillo *msg);
 static void guardar_en_logillo(Mensajillo* mensaje);
 static void inicializar_id_global();
+void inicializar_log_sorter();
+void finalizar_log_sorter();
 
 // Inicialización del thread pool
 ThreadPool* thread_pool_init() {
@@ -463,49 +474,122 @@ static int _cmp_entry(const void *a, const void *b) {
     return x->id - y->id;
 }
 
-static void actualizar_mensajes_log(const Mensajillo *msg) {
-    Mensajillo *arr = NULL;
-    size_t n = 0, cap = 0;
-    FILE *f = fopen("mensajes.log", "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof(line), f)) {
-            Mensajillo tmp;
-            if (sscanf(line, "id_mensaje=%d contenido=\"%255[^\"]\"",
-                       &tmp.id, tmp.contenido) == 2)
-            {
-                if (n == cap) {
-                    cap = cap ? cap * 2 : 16;
-                    arr = realloc(arr, cap * sizeof(*arr));
-                }
-                arr[n++] = tmp;
-            }
+// Función que reordena periódicamente los mensajes
+void* log_sorter_function(void* arg) {
+    while (log_sorter_running) {
+        // Esperar señal o timeout
+        pthread_mutex_lock(&sort_mutex);
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 5; // Reordenar cada 5 segundos o cuando se solicite
+        
+        // Esperar por señal o timeout
+        int was_signaled = 0;
+        while (!should_sort_log && log_sorter_running) {
+            int rv = pthread_cond_timedwait(&sort_cond, &sort_mutex, &ts);
+            if (rv == ETIMEDOUT)
+                break;
+            else if (rv == 0)
+                was_signaled = 1;
         }
-        fclose(f);
+        
+        if (should_sort_log || (!was_signaled && log_sorter_running)) {
+            should_sort_log = 0; // Reiniciar bandera
+            pthread_mutex_unlock(&sort_mutex);
+            
+            // Reordenar archivo - usamos mutex_log para bloquear actualizaciones mientras reordenamos
+            pthread_mutex_lock(&log_mutex);
+            
+            Mensajillo *arr = NULL;
+            size_t n = 0, cap = 0;
+            FILE *f = fopen("mensajes.log", "r");
+            
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    Mensajillo tmp;
+                    if (sscanf(line, "id_mensaje=%d contenido=\"%255[^\"]\"",
+                              &tmp.id, tmp.contenido) == 2)
+                    {
+                        if (n == cap) {
+                            cap = cap ? cap * 2 : 16;
+                            arr = realloc(arr, cap * sizeof(*arr));
+                            if (!arr) {
+                                fprintf(stderr, "Error de memoria al reordenar log\n");
+                                break;
+                            }
+                        }
+                        arr[n++] = tmp;
+                    }
+                }
+                fclose(f);
+                
+                if (arr && n > 0) {
+                    // Ordenar por ID
+                    qsort(arr, n, sizeof(*arr), _cmp_entry);
+                    
+                    // Escribir archivo ordenado
+                    f = fopen("mensajes.log", "w");
+                    if (f) {
+                        for (size_t i = 0; i < n; i++) {
+                            fprintf(f, "id_mensaje=%d contenido=\"%s\"\n",
+                                   arr[i].id, arr[i].contenido);
+                        }
+                        fflush(f);
+                        fsync(fileno(f));
+                        fclose(f);
+                    }
+                    free(arr);
+                }
+            }
+            
+            pthread_mutex_unlock(&log_mutex);
+        } else {
+            pthread_mutex_unlock(&sort_mutex);
+        }
     }
-    // añadir el mensaje nuevo
-    if (n == cap) {
-        cap = cap ? cap * 2 : 16;
-        arr = realloc(arr, cap * sizeof(*arr));
-    }
-    arr[n++] = *msg;
+    
+    return NULL;
+}
 
-    // ordenar por id
-    qsort(arr, n, sizeof(*arr), _cmp_entry);
-
-    // reescribir en modo "w" (sobrescribe) ya ordenado
-    f = fopen("mensajes.log", "w");
+// Modificamos la función para que use append
+static void actualizar_mensajes_log(const Mensajillo *msg) {
+    pthread_mutex_lock(&log_mutex);
+    
+    // Abrir en modo append - mucho más rápido y resistente a concurrencia
+    FILE *f = fopen("mensajes.log", "a");
     if (!f) {
-        perror("abrir mensajes.log");
-        free(arr);
+        perror("abrir mensajes.log para append");
+        pthread_mutex_unlock(&log_mutex);
         return;
     }
-    for (size_t i = 0; i < n; i++) {
-        fprintf(f, "id_mensaje=%d contenido=\"%s\"\n",
-                arr[i].id, arr[i].contenido);
-    }
+    
+    // Escribir nuevo mensaje al final
+    fprintf(f, "id_mensaje=%d contenido=\"%s\"\n", msg->id, msg->contenido);
+    fflush(f);
+    fsync(fileno(f));
     fclose(f);
-    free(arr);
+    
+    pthread_mutex_unlock(&log_mutex);
+    
+    // Determinar si debemos solicitar ordenamiento
+    // Solicitamos ordenamiento cada 20 mensajes o cuando el ID sea muy distante del anterior
+    static int mensaje_count = 0;
+    static int ultimo_id = 0;
+    
+    pthread_mutex_lock(&sort_mutex);
+    mensaje_count++;
+    
+    // Solicitar ordenamiento si han pasado suficientes mensajes o 
+    // si detectamos un mensaje que está muy fuera de secuencia
+    if (mensaje_count >= 20 || (ultimo_id > 0 && abs(msg->id - ultimo_id) > 10)) {
+        should_sort_log = 1;
+        mensaje_count = 0;
+        pthread_cond_signal(&sort_cond);
+    }
+    
+    ultimo_id = msg->id;
+    pthread_mutex_unlock(&sort_mutex);
 }
 
 // Inicializa mensaje_id_global leyendo el mayor id en mensajes.log
@@ -624,6 +708,23 @@ void *consumer_handler_thread(void *arg) {
     return NULL;
 }
 
+// Añadir esta función al inicio del main
+void inicializar_log_sorter() {
+    pthread_create(&log_sorter_thread, NULL, log_sorter_function, NULL);
+}
+
+// Añadir antes del return en main
+void finalizar_log_sorter() {
+    // Señalizar hilo para terminar
+    pthread_mutex_lock(&sort_mutex);
+    log_sorter_running = 0;
+    pthread_cond_signal(&sort_cond);
+    pthread_mutex_unlock(&sort_mutex);
+    
+    // Esperar a que termine
+    pthread_join(log_sorter_thread, NULL);
+}
+
 int main() {
     // Memoria compartida local (no se usa entre procesos aquí, pero puedes adaptarlo)
     cola = mmap(NULL, sizeof(ColaMensajillos), PROT_READ | PROT_WRITE,
@@ -635,6 +736,7 @@ int main() {
     inicializar_cola(cola);
     inicializar_grupos();
     inicializar_id_global();
+    inicializar_log_sorter();
 
     // Inicializar thread pool solo para producers
     pool = thread_pool_init();
@@ -747,6 +849,7 @@ int main() {
     // Nunca llegará aquí, pero por completitud:
     close(serverfd);
     thread_pool_shutdown(pool);
+    finalizar_log_sorter();
     munmap(cola, sizeof(ColaMensajillos));
     return 0;
 }
