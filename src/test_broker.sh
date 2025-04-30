@@ -35,6 +35,20 @@ fi
 
 # Función para limpiar procesos al terminar
 function cleanup {
+    # Recopilar resultados
+    echo -e "${BLUE}Recopilando resultados...${NC}"
+    #sleep 5
+    # Contar mensajes en el log de mensajes (este sí lo mantenemos)
+    if [ -f mensajes.log ]; then
+        NUM_MESSAGES=$(wc -l < mensajes.log)
+        echo -e "${GREEN}Total de mensajes registrados: $NUM_MESSAGES${NC}"
+        echo -e "${YELLOW}Primeros 5 mensajes:${NC}"
+        head -n 5 mensajes.log
+    else
+        echo -e "${RED}No se encontró el archivo mensajes.log${NC}"
+    fi
+
+
     echo -e "${YELLOW}Terminando todos los procesos...${NC}"
     pkill -P $$  # Mata todos los procesos hijos de este script
     # También aseguramos que broker se cierre
@@ -107,18 +121,7 @@ COOLDOWN=5
 echo -e "${YELLOW}Esperando $COOLDOWN segundos adicionales para que se completen todas las operaciones...${NC}"
 #sleep $COOLDOWN
 
-# Recopilar resultados
-echo -e "${BLUE}Recopilando resultados...${NC}"
-#sleep 5
-# Contar mensajes en el log de mensajes (este sí lo mantenemos)
-if [ -f mensajes.log ]; then
-    NUM_MESSAGES=$(wc -l < mensajes.log)
-    echo -e "${GREEN}Total de mensajes registrados: $NUM_MESSAGES${NC}"
-    echo -e "${YELLOW}Primeros 5 mensajes:${NC}"
-    head -n 5 mensajes.log
-else
-    echo -e "${RED}No se encontró el archivo mensajes.log${NC}"
-fi
+
 
 echo -e "${BLUE}Prueba completada.${NC}"
 echo -e "${BLUE}Terminar con CRTL + C${NC}"
