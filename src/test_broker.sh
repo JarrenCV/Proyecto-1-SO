@@ -9,8 +9,10 @@ NC='\033[0m' # No Color
 
 # Configuración de prueba
 NUM_CONSUMERS=15           # Número total de consumers
-NUM_PRODUCERS=3000           # Número de producers a lanzar
+NUM_PRODUCERS=3001           # Número de producers a lanzar
 TEST_DURATION=30           # Duración total de la prueba en segundos
+
+rm -f broker.log mensajes.log consumer_*.log broker consumer producer
 
 # Compilar todos los programas
 echo -e "${BLUE}Compilando los programas...${NC}"
@@ -59,6 +61,8 @@ function cleanup {
 
 # Registrar la función de limpieza para cuando el script termine
 trap cleanup EXIT INT TERM
+
+
 
 # Iniciar el broker (redireccionando salida a /dev/null)
 echo -e "${BLUE}Iniciando el broker...${NC}"
@@ -124,11 +128,12 @@ echo -e "${YELLOW}Esperando $COOLDOWN segundos adicionales para que se completen
 
 
 echo -e "${BLUE}Prueba completada.${NC}"
-echo -e "${BLUE}Terminar con CRTL + C${NC}"
-while true; do
-    # Esperar indefinidamente para mantener el script activo
-    sleep 1
-done
+# echo -e "${BLUE}Terminar con CRTL + C${NC}"
+# while true; do
+#     # Esperar indefinidamente para mantener el script activo
+    
+#     sleep 1
+# done
 # La limpieza se hará automáticamente por la función trap al salir
 # La limpieza se hará automáticamente por la función trap al salir
 

@@ -103,6 +103,10 @@ static int num_grupos = 0;
 static pthread_mutex_t grupos_mutex = PTHREAD_MUTEX_INITIALIZER;
 static ThreadPool *pool = NULL;
 
+static FILE *f_broker_log = NULL;
+static FILE *f_mensajes_log = NULL;
+
+
 #define MAX_MENSAJES_LOG 10000
 static Mensajillo log_mensajes[MAX_MENSAJES_LOG];
 static int num_log_mensajes = 0;
@@ -133,6 +137,7 @@ static void guardar_en_logillo(Mensajillo* mensaje);
 static void inicializar_id_global();
 void inicializar_log_sorter();
 void finalizar_log_sorter();
+void close_log_files();
 
 // Inicialización del thread pool
 ThreadPool* thread_pool_init() {
@@ -444,13 +449,20 @@ static int enviar_a_todos_grupos(Mensajillo *msg) {
 static pthread_mutex_t log_file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void guardar_log(const char *fmt, ...) {
-    pthread_mutex_lock(&log_file_mutex);  // Bloquear antes de acceder al archivo
+    static FILE *f = NULL;  // Mantener el archivo abierto
     
-    FILE *f = fopen("broker.log", "a");
+    pthread_mutex_lock(&log_file_mutex);
+    
+    // Abrir el archivo solo una vez
     if (!f) {
-        perror("abrir broker.log");
-        pthread_mutex_unlock(&log_file_mutex);  // No olvidar desbloquear
-        return;
+        f = fopen("broker.log", "a");
+        if (!f) {
+            perror("abrir broker.log");
+            pthread_mutex_unlock(&log_file_mutex);
+            return;
+        }
+        // Configurar para escritura sin buffer
+        setvbuf(f, NULL, _IONBF, 0);
     }
     
     va_list ap;
@@ -459,12 +471,12 @@ static void guardar_log(const char *fmt, ...) {
     fprintf(f, "\n");
     va_end(ap);
     
-    // Forzar escritura inmediata al disco
+    // No llamamos a fsync aquí para mejorar rendimiento
+    // fflush es suficiente para la mayoría de casos
     fflush(f);
-    fsync(fileno(f));
     
-    fclose(f);
-    pthread_mutex_unlock(&log_file_mutex);  // Desbloquear después de terminar
+    // No cerramos el archivo para evitar la sobrecarga de apertura/cierre
+    pthread_mutex_unlock(&log_file_mutex);
 }
 
 // comparador para qsort
@@ -552,45 +564,48 @@ void* log_sorter_function(void* arg) {
     return NULL;
 }
 
-// Modificamos la función para que use append
+// Modificaciones a la función actualizar_mensajes_log
 static void actualizar_mensajes_log(const Mensajillo *msg) {
+    static FILE *f = NULL;  // Mantener el archivo abierto
+    
     pthread_mutex_lock(&log_mutex);
     
-    // Abrir en modo append - mucho más rápido y resistente a concurrencia
-    FILE *f = fopen("mensajes.log", "a");
+    // Abrir el archivo solo una vez
     if (!f) {
-        perror("abrir mensajes.log para append");
-        pthread_mutex_unlock(&log_mutex);
-        return;
+        f = fopen("mensajes.log", "a");
+        if (!f) {
+            perror("abrir mensajes.log para append");
+            pthread_mutex_unlock(&log_mutex);
+            return;
+        }
+        // Configurar para escritura sin buffer
+        setvbuf(f, NULL, _IONBF, 0);
     }
     
-    // Escribir nuevo mensaje al final
     fprintf(f, "id_mensaje=%d contenido=\"%s\"\n", msg->id, msg->contenido);
     fflush(f);
-    fsync(fileno(f));
-    fclose(f);
     
+    // No cerramos el archivo para evitar la sobrecarga de apertura/cierre
     pthread_mutex_unlock(&log_mutex);
-    
-    // Determinar si debemos solicitar ordenamiento
-    // Solicitamos ordenamiento cada 20 mensajes o cuando el ID sea muy distante del anterior
-    static int mensaje_count = 0;
-    static int ultimo_id = 0;
-    
-    pthread_mutex_lock(&sort_mutex);
-    mensaje_count++;
-    
-    // Solicitar ordenamiento si han pasado suficientes mensajes o 
-    // si detectamos un mensaje que está muy fuera de secuencia
-    if (mensaje_count >= 20 || (ultimo_id > 0 && abs(msg->id - ultimo_id) > 10)) {
-        should_sort_log = 1;
-        mensaje_count = 0;
-        pthread_cond_signal(&sort_cond);
-    }
-    
-    ultimo_id = msg->id;
-    pthread_mutex_unlock(&sort_mutex);
 }
+
+void close_log_files() {
+    // Esta función debería llamarse antes del return en main()
+    pthread_mutex_lock(&log_file_mutex);
+    if (f_broker_log) {
+        fclose(f_broker_log);
+        f_broker_log = NULL;
+    }
+    pthread_mutex_unlock(&log_file_mutex);
+    
+    pthread_mutex_lock(&log_mutex);
+    if (f_mensajes_log) {
+        fclose(f_mensajes_log);
+        f_mensajes_log = NULL;
+    }
+    pthread_mutex_unlock(&log_mutex);
+}
+
 
 // Inicializa mensaje_id_global leyendo el mayor id en mensajes.log
 static void inicializar_id_global() {
