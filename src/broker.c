@@ -18,6 +18,19 @@
 #include <stdarg.h>
 #include <limits.h>   // para qsort
 #include <stdbool.h>  // Para usar bool
+#include <poll.h>
+
+#define MAX_GRUPOS 3
+#define MAX_CONSUMERS_PER_GROUP 100
+#define MAX_CONSUMERS_TOTAL (MAX_GRUPOS * MAX_CONSUMERS_PER_GROUP)
+typedef struct {
+    int sockfd;
+    char grupo[32];
+} ConsumerSocketInfo;
+
+static ConsumerSocketInfo consumers[MAX_CONSUMERS_TOTAL];
+static int num_consumers = 0;
+static pthread_mutex_t consumers_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Configuración del thread pool (sólo para producers)
 #define THREAD_POOL_SIZE 8
@@ -29,8 +42,6 @@ static void guardar_log(const char *fmt, ...);
 #define MAXIMO_MENSAJE 256
 #define TAMANO_COLA 2000  // o más, dependiendo de tus necesidades
 #define BROKER_PORT 5000
-#define MAX_GRUPOS 3
-#define MAX_CONSUMERS_PER_GROUP 100
 
 typedef struct {
     int id;
@@ -59,6 +70,7 @@ typedef struct {
 typedef enum {
     TASK_CLIENT_HANDLER,
     TASK_LOG_UPDATE,
+    TASK_CONSUMERS_POLL, // <--- NUEVO
 } TaskType;
 
 typedef struct {
@@ -138,6 +150,7 @@ static void inicializar_id_global();
 void inicializar_log_sorter();
 void finalizar_log_sorter();
 void close_log_files();
+void atender_consumers_poll_task(void *unused);
 
 // Inicialización del thread pool
 ThreadPool* thread_pool_init() {
@@ -229,6 +242,10 @@ void* thread_function(void* arg) {
                 LogUpdateData* data = (LogUpdateData*)task.data;
                 actualizar_mensajes_log(&data->mensaje);
                 free(data);
+                break;
+            }
+            case TASK_CONSUMERS_POLL: {
+                atender_consumers_poll_task(task.data);
                 break;
             }
         }
@@ -740,6 +757,59 @@ void finalizar_log_sorter() {
     pthread_join(log_sorter_thread, NULL);
 }
 
+void atender_consumers_poll_task(void *unused) {
+    (void)unused;
+    struct pollfd pfds[MAX_CONSUMERS_TOTAL];
+    int nfds = 0;
+
+    pthread_mutex_lock(&consumers_mutex);
+    nfds = num_consumers;
+    for (int i = 0; i < nfds; ++i) {
+        pfds[i].fd = consumers[i].sockfd;
+        pfds[i].events = POLLIN;
+    }
+    pthread_mutex_unlock(&consumers_mutex);
+
+    int ret = poll(pfds, nfds, 50); // 50ms timeout
+    if (ret > 0) {
+        pthread_mutex_lock(&consumers_mutex);
+        for (int i = 0; i < nfds; ++i) {
+            if (pfds[i].revents & POLLIN) {
+                Mensajillo msg;
+                ssize_t n = recv(pfds[i].fd, &msg, sizeof(msg), MSG_PEEK);
+                if (n <= 0) {
+                    // Consumer desconectado
+                    quitar_consumer_grupo(pfds[i].fd, consumers[i].grupo);
+                    close(pfds[i].fd);
+                    // Eliminar de la lista
+                    consumers[i] = consumers[num_consumers-1];
+                    num_consumers--;
+                    i--; nfds--;
+                    continue;
+                }
+                // Leer ACKs
+                char ackbuf[64];
+                n = recv(pfds[i].fd, ackbuf, sizeof(ackbuf), 0);
+                if (n > 0 && strncmp(ackbuf, "ACK ", 4) == 0) {
+                    int ack_id = atoi(ackbuf + 4);
+                    guardar_log("RECIBIDO_ACK consumer[%s] fd=%d id_mensaje=%d",
+                                consumers[i].grupo, pfds[i].fd, ack_id);
+                }
+            }
+        }
+        pthread_mutex_unlock(&consumers_mutex);
+    }
+}
+
+void *consumers_poll_scheduler(void *arg) {
+    (void)arg;
+    while (1) {
+        thread_pool_add_task(pool, TASK_CONSUMERS_POLL, NULL);
+        usleep(50000); // 50ms
+    }
+    return NULL;
+}
+
 int main() {
     // Memoria compartida local (no se usa entre procesos aquí, pero puedes adaptarlo)
     cola = mmap(NULL, sizeof(ColaMensajillos), PROT_READ | PROT_WRITE,
@@ -793,6 +863,10 @@ int main() {
         exit(1);
     }
 
+    pthread_t poll_sched_thread;
+    pthread_create(&poll_sched_thread, NULL, consumers_poll_scheduler, NULL);
+    pthread_detach(poll_sched_thread);
+
     while (1) {
         struct sockaddr_in cli_addr;
         socklen_t cli_len = sizeof(cli_addr);
@@ -831,28 +905,26 @@ int main() {
         } 
         // Consumer: crear un hilo dedicado
         else if (n > 0 && strncmp(buffer, "CONSUMIR", 8) == 0) {
-            // Crear estructura de datos para el hilo consumer
-            ConsumerThreadData *consumer_data = malloc(sizeof(ConsumerThreadData));
-            if (!consumer_data) {
-                perror("malloc consumer data");
-                close(clientfd);
-                continue;
+            char group_name[32] = {0};
+            if (sscanf(buffer, "CONSUMIR %31s", group_name) != 1) {
+                GrupoConsumers *g = seleccionar_grupo_automatico();
+                if (g) strncpy(group_name, g->nombre, sizeof(group_name)-1);
+                else strncpy(group_name, "grupo1", sizeof(group_name)-1);
             }
-            consumer_data->clientfd = clientfd;
-            
-            // Crear un hilo dedicado para este consumer
-            pthread_t consumer_thread;
-            if (pthread_create(&consumer_thread, NULL, consumer_handler_thread, consumer_data) != 0) {
-                perror("pthread_create consumer");
-                free(consumer_data);
+            agregar_consumer_grupo(clientfd, group_name);
+
+            pthread_mutex_lock(&consumers_mutex);
+            if (num_consumers < MAX_CONSUMERS_TOTAL) {
+                consumers[num_consumers].sockfd = clientfd;
+                strncpy(consumers[num_consumers].grupo, group_name, sizeof(consumers[num_consumers].grupo)-1);
+                num_consumers++;
+                guardar_log("CONSUMIDOR[%s] fd=%d conectado (threadpool)", group_name, clientfd);
+                printf("Consumer[%s] connected: fd=%d (threadpool)\n", group_name, clientfd);
+            } else {
                 close(clientfd);
-                continue;
+                printf("Demasiados consumers conectados\n");
             }
-            
-            // Desacoplar el hilo para que se libere automáticamente al terminar
-            pthread_detach(consumer_thread);
-            
-            printf("Consumer thread created for client fd=%d\n", clientfd);
+            pthread_mutex_unlock(&consumers_mutex);
         }
         else {
             // Conexión no reconocida
