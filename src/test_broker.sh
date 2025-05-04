@@ -8,8 +8,8 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Configuración de prueba
-NUM_CONSUMERS=3000          # Número total de consumers
-NUM_PRODUCERS=3000          # Número de producers a lanzar
+NUM_CONSUMERS=3500          # Número total de consumers
+NUM_PRODUCERS=3500          # Número de producers a lanzar
 TEST_DURATION=30            # Duración total de la prueba en segundos
 
 rm -f broker.log mensajes.log consumer_*.log broker consumer producer
@@ -85,7 +85,8 @@ echo -e "${GREEN}Broker iniciado con PID $BROKER_PID${NC}"
 echo -e "${BLUE}Iniciando $NUM_CONSUMERS consumers...${NC}"
 for ((i=1; i<=NUM_CONSUMERS; i++)); do
     # Iniciar consumer redireccionando salida a /dev/null
-    stdbuf -oL -eL ./consumer > consumer_${i}.log 2>&1 &
+    # stdbuf -oL -eL ./consumer > consumer_${i}.log 2>&1 &
+    stdbuf -oL -eL ./consumer > /dev/null 2>&1 &
     CONSUMER_PID=$!
     echo -e "${GREEN}Consumer $i iniciado con PID $CONSUMER_PID${NC}"
     
@@ -125,8 +126,6 @@ fi
 COOLDOWN=5
 echo -e "${YELLOW}Esperando $COOLDOWN segundos adicionales para que se completen todas las operaciones...${NC}"
 #sleep $COOLDOWN
-
-
 
 echo -e "${BLUE}Prueba completada.${NC}"
 # echo -e "${BLUE}Terminar con CRTL + C${NC}"
