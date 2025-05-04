@@ -21,15 +21,14 @@
 #include <poll.h>
 
 #define MAX_GRUPOS 3
-#define MAX_CONSUMERS_PER_GROUP 100
-#define MAX_CONSUMERS_TOTAL (MAX_GRUPOS * MAX_CONSUMERS_PER_GROUP)
 typedef struct {
     int sockfd;
     char grupo[32];
 } ConsumerSocketInfo;
 
-static ConsumerSocketInfo consumers[MAX_CONSUMERS_TOTAL];
+static ConsumerSocketInfo *consumers = NULL;
 static int num_consumers = 0;
+static int consumers_capacity = 0;
 static pthread_mutex_t consumers_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Configuración del thread pool (sólo para producers)
@@ -100,8 +99,9 @@ typedef struct {
 
 typedef struct {
     char nombre[32];
-    int sockets[MAX_CONSUMERS_PER_GROUP];
+    int *sockets;      // ahora es dinámico
     int count;
+    int capacity;
     int offset;
     pthread_mutex_t mutex;
 } GrupoConsumers;
@@ -359,6 +359,8 @@ void inicializar_grupos() {
     for (int i = 0; i < MAX_GRUPOS; i++) {
         snprintf(grupos[i].nombre, sizeof(grupos[i].nombre), "grupo%d", i+1);
         grupos[i].count = 0;
+        grupos[i].capacity = 16;
+        grupos[i].sockets = malloc(grupos[i].capacity * sizeof(int));
         grupos[i].offset = 0;
         pthread_mutex_init(&grupos[i].mutex, NULL);
     }
@@ -399,9 +401,18 @@ void agregar_consumer_grupo(int sockfd, const char *grupo) {
     GrupoConsumers *g = obtener_o_crear_grupo(grupo);
     if (!g) return;
     pthread_mutex_lock(&g->mutex);
-    if (g->count < MAX_CONSUMERS_PER_GROUP) {
-        g->sockets[g->count++] = sockfd;
+    if (g->count >= g->capacity) {
+        int newcap = g->capacity * 2;
+        int *tmp = realloc(g->sockets, newcap * sizeof(int));
+        if (tmp) {
+            g->sockets = tmp;
+            g->capacity = newcap;
+        } else {
+            pthread_mutex_unlock(&g->mutex);
+            return;
+        }
     }
+    g->sockets[g->count++] = sockfd;
     pthread_mutex_unlock(&g->mutex);
 }
 
@@ -759,7 +770,8 @@ void finalizar_log_sorter() {
 
 void atender_consumers_poll_task(void *unused) {
     (void)unused;
-    struct pollfd pfds[MAX_CONSUMERS_TOTAL];
+    struct pollfd *pfds = malloc(num_consumers * sizeof(struct pollfd));
+    if (!pfds) return;
     int nfds = 0;
 
     pthread_mutex_lock(&consumers_mutex);
@@ -799,6 +811,7 @@ void atender_consumers_poll_task(void *unused) {
         }
         pthread_mutex_unlock(&consumers_mutex);
     }
+    free(pfds);
 }
 
 void *consumers_poll_scheduler(void *arg) {
@@ -914,16 +927,24 @@ int main() {
             agregar_consumer_grupo(clientfd, group_name);
 
             pthread_mutex_lock(&consumers_mutex);
-            if (num_consumers < MAX_CONSUMERS_TOTAL) {
-                consumers[num_consumers].sockfd = clientfd;
-                strncpy(consumers[num_consumers].grupo, group_name, sizeof(consumers[num_consumers].grupo)-1);
-                num_consumers++;
-                guardar_log("CONSUMIDOR[%s] fd=%d conectado (threadpool)", group_name, clientfd);
-                printf("Consumer[%s] connected: fd=%d (threadpool)\n", group_name, clientfd);
-            } else {
-                close(clientfd);
-                printf("Demasiados consumers conectados\n");
+            if (num_consumers >= consumers_capacity) {
+                int newcap = consumers_capacity ? consumers_capacity * 2 : 128;
+                ConsumerSocketInfo *tmp = realloc(consumers, newcap * sizeof(ConsumerSocketInfo));
+                if (tmp) {
+                    consumers = tmp;
+                    consumers_capacity = newcap;
+                } else {
+                    close(clientfd);
+                    printf("No hay memoria para más consumers\n");
+                    pthread_mutex_unlock(&consumers_mutex);
+                    continue;
+                }
             }
+            consumers[num_consumers].sockfd = clientfd;
+            strncpy(consumers[num_consumers].grupo, group_name, sizeof(consumers[num_consumers].grupo)-1);
+            num_consumers++;
+            guardar_log("CONSUMIDOR[%s] fd=%d conectado (threadpool)", group_name, clientfd);
+            printf("Consumer[%s] connected: fd=%d (threadpool)\n", group_name, clientfd);
             pthread_mutex_unlock(&consumers_mutex);
         }
         else {

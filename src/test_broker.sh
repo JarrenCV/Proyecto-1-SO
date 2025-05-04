@@ -8,9 +8,9 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Configuración de prueba
-NUM_CONSUMERS=15           # Número total de consumers
+NUM_CONSUMERS=3000          # Número total de consumers
 NUM_PRODUCERS=3000          # Número de producers a lanzar
-TEST_DURATION=30           # Duración total de la prueba en segundos
+TEST_DURATION=30            # Duración total de la prueba en segundos
 
 rm -f broker.log mensajes.log consumer_*.log broker consumer producer
 
@@ -35,6 +35,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# ...continúa con el inicio del broker y la prueba masiva...
+
 # Función para limpiar procesos al terminar
 function cleanup {
     # Recopilar resultados
@@ -54,6 +56,7 @@ function cleanup {
     echo -e "${YELLOW}Terminando todos los procesos...${NC}"
     pkill -P $$  # Mata todos los procesos hijos de este script
     # También aseguramos que broker se cierre
+    sleep 2
     pkill -f "./broker"
     echo -e "${GREEN}Limpieza completa${NC}"
     exit 0
@@ -61,8 +64,6 @@ function cleanup {
 
 # Registrar la función de limpieza para cuando el script termine
 trap cleanup EXIT INT TERM
-
-
 
 # Iniciar el broker (redireccionando salida a /dev/null)
 echo -e "${BLUE}Iniciando el broker...${NC}"
@@ -101,7 +102,7 @@ DELAY=$((TEST_DURATION / NUM_PRODUCERS))
 if [ $DELAY -lt 1 ]; then
     DELAY=1
 fi
-
+sleep 1
 for ((i=1; i<=NUM_PRODUCERS; i++)); do
     ./producer > /dev/null 2>&1 &
     PRODUCER_PID=$!
@@ -135,7 +136,3 @@ echo -e "${BLUE}Prueba completada.${NC}"
 #     sleep 1
 # done
 # La limpieza se hará automáticamente por la función trap al salir
-# La limpieza se hará automáticamente por la función trap al salir
-
-
-
