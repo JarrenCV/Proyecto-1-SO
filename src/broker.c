@@ -2,60 +2,44 @@
 #define BROKER_H
 
 #define _POSIX_C_SOURCE 199309L
+#define MAX_MENSAJES_LOG 10000
+#define MAX_GRUPOS 3
+#define MAXIMO_MENSAJE 256
+#define TAMANO_COLA 100
+#define BROKER_PORT 5000
+#define THREAD_POOL_SIZE 8
+#define MAX_QUEUE_SIZE 256
 
 #include <stdio.h>
-#include <stdlib.h>    // ya estaba, para qsort()
-#include <sys/ipc.h>
-#include <sys/shm.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <sys/mman.h>
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <errno.h>
 #include <stdarg.h>
-#include <limits.h>   // para qsort
-#include <stdbool.h>  // Para usar bool
+#include <limits.h>
+#include <stdbool.h>
 #include <poll.h>
 
-#define MAX_GRUPOS 3
 typedef struct {
     int sockfd;
     char grupo[32];
 } ConsumerSocketInfo;
-
-static ConsumerSocketInfo *consumers = NULL;
-static int num_consumers = 0;
-static int consumers_capacity = 0;
-static pthread_mutex_t consumers_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-// Configuración del thread pool (sólo para producers)
-#define THREAD_POOL_SIZE 8
-#define MAX_QUEUE_SIZE 256
-
-// Prototipo único de guardar_log(), debe estar antes de cualquier llamada
-static void guardar_log(const char *fmt, ...);
-
-#define MAXIMO_MENSAJE 256
-#define TAMANO_COLA 2000  // o más, dependiendo de tus necesidades
-#define BROKER_PORT 5000
 
 typedef struct {
     int id;
     char contenido[MAXIMO_MENSAJE];
 } Mensajillo;
 
-// Declaración anticipada de funciones
-static void actualizar_mensajes_log(const Mensajillo *msg);
-
 // Datos para el manejador de clientes (para producers)
 typedef struct {
     int clientfd;
 } ClientHandlerData;
 
-// Nueva estructura para hilos dedicados de consumers
+// Estructura para hilos dedicados de consumers
 typedef struct {
     int clientfd;
 } ConsumerThreadData;
@@ -69,9 +53,10 @@ typedef struct {
 typedef enum {
     TASK_CLIENT_HANDLER,
     TASK_LOG_UPDATE,
-    TASK_CONSUMERS_POLL, // <--- NUEVO
+    TASK_CONSUMERS_POLL,
 } TaskType;
 
+// Estructura para tareas
 typedef struct {
     TaskType type;
     void *data;
@@ -99,7 +84,7 @@ typedef struct {
 
 typedef struct {
     char nombre[32];
-    int *sockets;      // ahora es dinámico
+    int *sockets;
     int count;
     int capacity;
     int offset;
@@ -108,32 +93,28 @@ typedef struct {
 
 // Variables globales
 ColaMensajillos *cola = NULL;
-int mensaje_id_global = 1; // ID consecutivo para los mensajes
+int mensaje_id_global = 1;
 pthread_mutex_t id_mutex = PTHREAD_MUTEX_INITIALIZER;
 static GrupoConsumers grupos[MAX_GRUPOS];
 static int num_grupos = 0;
 static pthread_mutex_t grupos_mutex = PTHREAD_MUTEX_INITIALIZER;
 static ThreadPool *pool = NULL;
-
 static FILE *f_broker_log = NULL;
 static FILE *f_mensajes_log = NULL;
-
-
-#define MAX_MENSAJES_LOG 10000
-static Mensajillo log_mensajes[MAX_MENSAJES_LOG];
-static int num_log_mensajes = 0;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-// Variables para control de ordenamiento periódico
 static pthread_t log_sorter_thread;
 static volatile int should_sort_log = 0;
 static pthread_mutex_t sort_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sort_cond = PTHREAD_COND_INITIALIZER;
 static volatile int log_sorter_running = 1;
+static ConsumerSocketInfo *consumers = NULL;
+static int num_consumers = 0;
+static int consumers_capacity = 0;
+static pthread_mutex_t consumers_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Prototipos de funciones
 void atender_cliente_task(ClientHandlerData *data);
-void *consumer_handler_thread(void *arg);  // Nueva función para hilos dedicados de consumers
+void *consumer_handler_thread(void *arg);
 int estaRellenita(ColaMensajillos *cola);
 int noTieneElementos(ColaMensajillos *cola);
 int insertar_mensajillo(ColaMensajillos *cola, Mensajillo *nuevo);
@@ -151,6 +132,8 @@ void inicializar_log_sorter();
 void finalizar_log_sorter();
 void close_log_files();
 void atender_consumers_poll_task(void *unused);
+static void actualizar_mensajes_log(const Mensajillo *msg);
+static void guardar_log(const char *fmt, ...);
 
 // Inicialización del thread pool
 ThreadPool* thread_pool_init() {
@@ -352,7 +335,6 @@ void inicializar_cola(ColaMensajillos *cola) {
     pthread_mutexattr_destroy(&attr);
 }
 
-// ---------------------------------------------------------
 // a) inicializar 10 grupos fijos
 void inicializar_grupos() {
     pthread_mutex_lock(&grupos_mutex);
@@ -507,7 +489,7 @@ static void guardar_log(const char *fmt, ...) {
     pthread_mutex_unlock(&log_file_mutex);
 }
 
-// comparador para qsort
+// Comparador para qsort
 static int _cmp_entry(const void *a, const void *b) {
     const Mensajillo *x = a;
     const Mensajillo *y = b;
@@ -751,12 +733,10 @@ void *consumer_handler_thread(void *arg) {
     return NULL;
 }
 
-// Añadir esta función al inicio del main
 void inicializar_log_sorter() {
     pthread_create(&log_sorter_thread, NULL, log_sorter_function, NULL);
 }
 
-// Añadir antes del return en main
 void finalizar_log_sorter() {
     // Señalizar hilo para terminar
     pthread_mutex_lock(&sort_mutex);
@@ -824,7 +804,7 @@ void *consumers_poll_scheduler(void *arg) {
 }
 
 int main() {
-    // Memoria compartida local (no se usa entre procesos aquí, pero puedes adaptarlo)
+    // Memoria compartida local
     cola = mmap(NULL, sizeof(ColaMensajillos), PROT_READ | PROT_WRITE,
                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (cola == MAP_FAILED) {
@@ -836,7 +816,6 @@ int main() {
     inicializar_id_global();
     inicializar_log_sorter();
 
-    // Inicializar thread pool solo para producers
     pool = thread_pool_init();
     if (!pool) {
         fprintf(stderr, "Error al inicializar el thread pool\n");

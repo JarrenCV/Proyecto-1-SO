@@ -31,14 +31,12 @@ int main() {
         if (sockfd < 0) {
             if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
                 perror("socket");
-                //sleep(1);
                 continue;
             }
             if (connect(sockfd, (struct sockaddr *)&broker_addr, sizeof(broker_addr)) < 0) {
                 perror("connect");
                 close(sockfd);
                 sockfd = -1;
-                //sleep(1);
                 continue;
             }
         }
@@ -47,7 +45,6 @@ int main() {
             perror("send");
             close(sockfd);
             sockfd = -1;
-            //sleep(1);
             continue;
         }
 
@@ -66,8 +63,6 @@ int main() {
         } else {
             printf("[Consumer PID=%d] No hay mensajes disponibles o error.\n", getpid());
         }
-
-        //sleep(1);
     }
 
     if (sockfd >= 0) close(sockfd);
