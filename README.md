@@ -46,8 +46,6 @@ Puedes lanzar múltiples productores y consumidores al mismo tiempo.
 
 ## Problemas conocidos o limitaciones
 
-## Problemas conocidos o limitaciones
-
 - **Persistencia limitada:** Si el broker se reinicia, solo se conserva el ID global de mensajes leyendo el log, pero los mensajes en la cola se pierden.
 - **Tamaño de la cola limitado:** Si la cola de mensajes se llena, los productores pueden experimentar rechazos o demoras.
 - **Escalabilidad limitada:** El sistema está diseñado para ejecutarse en una sola máquina y no soporta múltiples brokers ni balanceo de carga entre ellos.
